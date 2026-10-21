@@ -1,0 +1,19 @@
+[project]
+name = "bluesky-stream-analytics"
+version = "0.1.0"
+description = "Collects Bluesky's public Jetstream feed and turns it into product analytics"
+readme = "README.md"
+authors = [
+    { name = "dhirajkk91", email = "dhirajkk91@gmail.com" }
+]
+requires-python = ">=3.14"
+dependencies = [
+    "websockets>=17.3",
+]
+
+[project.scripts]
+watch = "bluesky_stream_analytics.watch:main"
+
+[build-system]
+requires = ["uv_build>=0.12.15,<0.13.0"]
+build-backend = "uv_build"
