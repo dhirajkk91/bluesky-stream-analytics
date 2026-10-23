@@ -31,8 +31,8 @@ Figuring out how to still get correct numbers out of all that is the part I'm mo
 
 Roughly:
 
-1. Connect to the feed and just watch events come in on my laptop
-2. Save them to files without losing anything if it crashes
+1. ~~Connect to the feed and just watch events come in on my laptop~~ ✅
+2. ~~Save them to files without losing anything if it crashes~~ ✅
 3. Move it to a cloud server so it runs 24/7
 4. Make the saved data queryable with SQL
 5. Clean it up into proper tables (dedupe, handle deletes, late events)
@@ -51,4 +51,19 @@ This list will probably change as I go.
 
 ## Status
 
-Idea stage. Nothing built yet.
+The collector works on my laptop. It saves every event to hourly compressed files, remembers where it left off, and can be killed and restarted without leaving gaps. It isn't running 24/7 yet, so there's no long-term data so far.
+
+## Running it
+
+Needs [uv](https://docs.astral.sh/uv/).
+
+```bash
+uv run watch              # live summary of the stream every 10 seconds, nothing saved
+uv run collect            # save every event under ./data
+uv run pytest             # run the tests
+```
+
+## Docs
+
+- [Architecture](docs/architecture.md): how it works right now
+- [Decisions](docs/decisions.md): why it works that way
