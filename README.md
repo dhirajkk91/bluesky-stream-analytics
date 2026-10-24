@@ -70,5 +70,15 @@ The AWS setup lives in `infra/aws/` as Terraform.
 
 ## More detail
 
-- [Architecture](docs/architecture.md): how it works right now
-- [Decisions](docs/decisions.md): why I built it this way
+**Architecture**
+- [End-to-end pipeline](docs/architectures/end-to-end-pipeline.md): how the pieces fit together
+- [Collector](docs/architectures/collector.md): saving every event and surviving crashes
+- [Uploader](docs/architectures/uploader.md): getting files safely into S3
+- [Infrastructure](docs/architectures/infrastructure.md): the Oracle server and the AWS side
+
+**Decisions**
+- [Engineering decisions](docs/decisions/engineering-decisions.md): why I built it this way
+
+**Validation**
+- [Testing](docs/validation/testing.md): tests, the kill test, and the first real run
+- [CI](docs/validation/ci.md)

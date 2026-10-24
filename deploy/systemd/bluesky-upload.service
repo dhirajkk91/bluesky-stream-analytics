@@ -1,0 +1,18 @@
+[Unit]
+Description=Upload finished Bluesky event files to S3
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+User=bluesky
+Group=bluesky
+WorkingDirectory=/opt/bluesky-stream-analytics
+EnvironmentFile=/etc/bluesky/upload.env
+ExecStart=/opt/bluesky-stream-analytics/.venv/bin/upload --bucket ${BUCKET} --data-dir /var/lib/bluesky
+Environment=PYTHONUNBUFFERED=1
+StateDirectory=bluesky
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=read-only

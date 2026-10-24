@@ -1,0 +1,23 @@
+[Unit]
+Description=Bluesky Jetstream collector
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=bluesky
+Group=bluesky
+WorkingDirectory=/opt/bluesky-stream-analytics
+ExecStart=/opt/bluesky-stream-analytics/.venv/bin/collect --data-dir /var/lib/bluesky
+Environment=PYTHONUNBUFFERED=1
+Restart=always
+RestartSec=5
+TimeoutStopSec=120
+StateDirectory=bluesky
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=read-only
+
+[Install]
+WantedBy=multi-user.target
