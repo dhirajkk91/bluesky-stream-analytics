@@ -48,7 +48,7 @@ flowchart LR
 | Shape | `VM.Standard.A1.Flex` (ARM), 2 OCPU, 12 GB memory, 100 GB boot volume |
 | OS | Ubuntu 24.04 (aarch64) |
 | Account | Pay As You Go, so the server isn't reclaimed as idle. Free within the Always Free limits |
-| Network | Only SSH (22) open inbound, key login only. The programs only connect outbound |
+| Network | VCN `bluesky-vcn` (`10.0.0.0/16`) with an internet gateway, a default route `0.0.0.0/0` to it, and a public subnet `10.0.0.0/24`. Only SSH (22) open inbound, key login only. The programs only connect outbound |
 
 | Path | What |
 |---|---|

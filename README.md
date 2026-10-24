@@ -31,15 +31,15 @@ So far I've got a collector that connects to the feed, saves every event to hour
 
 First look at the real feed: around 475 events a second, about two thirds of them likes, and the files shrink about 4x when compressed.
 
-Finished files now get uploaded to S3, and the AWS side (bucket, permissions, budget alert) is set up with Terraform. Tests and Terraform checks run on every pull request.
+It now runs around the clock on a free Oracle Cloud ARM server, as a systemd service that comes back on its own after a crash or a reboot. I rebooted the server on purpose to check: it picked up 5 seconds before where it stopped and caught up on the missed minute within the next one. Every 10 minutes, finished hourly files get uploaded to S3 by an AWS user that's only allowed to upload, and the AWS side (bucket, permissions, budget alert) is set up with Terraform. Tests and Terraform checks run on every pull request.
 
-What's not done yet: it still runs on my laptop. Next up is moving it to an always-on server so it can collect around the clock.
+Next up is making the data in S3 queryable with SQL.
 
 ## The plan
 
 1. ~~Connect to the feed and watch events come in~~ 
 2. ~~Save every event without losing anything if it crashes~~ 
-3. Run it 24/7 in the cloud, with files going to S3 (S3 part done, server next)
+3. ~~Run it 24/7 in the cloud, with files going to S3~~
 4. Make the saved data queryable with SQL
 5. Clean it up into proper tables (dedupe, handle deletes, late events)
 6. Build the product metrics on top

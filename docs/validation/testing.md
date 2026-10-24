@@ -40,3 +40,14 @@ About 7 minutes from a laptop, starting at the live edge, with no reconnects:
 | Unreadable lines | 0 |
 | Size | 108.6 MB raw, 26.9 MB with zstd (about 4x smaller) |
 | Mix | likes 65%, reposts 11.5%, posts 10.9%, follows 9.4% |
+
+## On the server
+
+Checked on the Oracle server after setup:
+
+| Check | Result |
+|---|---|
+| Collector rate | About 440 to 460 events per second, 0.1 s behind live |
+| Memory | About 90 MB |
+| Reboot | systemd stopped the collector cleanly (no recovery needed), started it again on boot, and it resumed 5 seconds before its last saved event. The first minute after boot ran at about 650 events per second while it caught up on the minute the server was down, then settled back to normal |
+| Upload | The timer's first run uploaded the hour file finished at shutdown (11.1 MB) with the upload-only IAM user. Running it again found nothing to do |
