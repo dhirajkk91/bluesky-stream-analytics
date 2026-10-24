@@ -82,3 +82,15 @@ Its access key is created by hand, not in Terraform, so the secret never ends up
 ## D-011: Terraform state stays local for now
 
 The state file lives on my laptop and is ignored by git. With one person and a handful of resources, a remote backend adds setup without solving a real problem yet. It moves to S3 if the infrastructure grows or CI starts applying changes.
+
+## D-012: systemd, not Docker, on the server
+
+The collector and uploader run as plain systemd units from a git checkout.
+
+**Why:** there's one Python app with one dependency file. systemd already handles what's needed: start on boot, restart on crash, a clean `SIGTERM` on stop, a schedule for the uploader, and logs. Docker would add an image build and a registry without solving anything yet.
+
+**Revisit when:** several services have to run side by side, like a streaming broker or monitoring.
+
+## D-013: The uploader's key lives in a root-only file read by systemd
+
+`/etc/bluesky/upload.env` is owned by root with mode `600`. systemd reads it as root and passes the values to the uploader as environment variables, so the `bluesky` user can't read the file itself, and the key is never in the repo or in shell history.
