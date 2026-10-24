@@ -54,3 +54,31 @@ The collector always uses `jetstream2.us-east.bsky.network`.
 After a dropped connection, the wait before retrying doubles each time (1s, 2s, 4s, up to 60s), and the actual wait is random between half and all of that.
 
 **Why:** retrying instantly in a loop hammers a server that's already having trouble. The randomness stops many clients that dropped at the same moment from all reconnecting at the same moment too.
+
+## D-008: Collector server on Oracle Cloud, data on AWS
+
+The always-on server runs on Oracle Cloud's free ARM tier. Storage and SQL are on AWS.
+
+**Why Oracle for the server:** it gives 2 CPUs and 12 GB of memory free with no end date. The cheapest sensible AWS server (`t4g.small`, 2 GB) is on a free trial only until the end of 2026, then about $18 a month with its disk and public IP, and it's too small for the services later steps add. An 8 GB AWS server is around $49 a month.
+
+**Why AWS for the data:** S3, Glue and Athena are what data engineering roles ask for, Athena queries files directly for a few cents, and Oracle's free object storage (20 GB) would fill in about three days.
+
+**Cost:** two cloud accounts to manage, and the server could be hard to get if Oracle runs out of free ARM capacity. Fallback: run the collector on a `t4g.small` until that's solved.
+
+## D-009: Upload in a separate command, checksummed, never overwriting
+
+**Why separate:** the collector's only job is not to miss events. If S3 is down or the credentials are wrong, uploads fail and retry on the next run, and collection isn't affected.
+
+**Why the checksum:** S3 verifies the SHA-256 and rejects a corrupted upload, so a local file is never deleted on the strength of a broken copy.
+
+**Why `If-None-Match`:** a run that uploads a file but dies before deleting it would otherwise upload it again on the next run. The conditional write makes S3 refuse instead, and the uploader treats that as done. Uploading the same files twice is always safe.
+
+## D-010: The server's AWS user can only upload
+
+The IAM user on the server has one permission: `s3:PutObject` under `raw/`. It can't list, read or delete anything, so leaked keys can't expose or destroy data. Uploading with a checksum and `If-None-Match` needs nothing more.
+
+Its access key is created by hand, not in Terraform, so the secret never ends up in the Terraform state file.
+
+## D-011: Terraform state stays local for now
+
+The state file lives on my laptop and is ignored by git. With one person and a handful of resources, a remote backend adds setup without solving a real problem yet. It moves to S3 if the infrastructure grows or CI starts applying changes.
