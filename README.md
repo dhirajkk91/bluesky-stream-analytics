@@ -33,14 +33,16 @@ First look at the real feed: around 475 events a second, about two thirds of the
 
 It now runs around the clock on a free Oracle Cloud ARM server, as a systemd service that comes back on its own after a crash or a reboot. I rebooted the server on purpose to check: it picked up 5 seconds before where it stopped and caught up on the missed minute within the next one. Every 10 minutes, finished hourly files get uploaded to S3 by an AWS user that's only allowed to upload, and the AWS side (bucket, permissions, budget alert) is set up with Terraform. Tests and Terraform checks run on every pull request.
 
-Next up is making the data in S3 queryable with SQL.
+The data in S3 can now be queried with SQL in Athena, straight from the files, with partitions picked up automatically and a cap on what any query can cost. The first checks found no missing minutes, and the only duplicates lined up exactly with a reboot and two dropped connections, which is what the collector is designed to do.
+
+Next up is turning the raw events into proper, clean tables.
 
 ## The plan
 
 1. ~~Connect to the feed and watch events come in~~ 
 2. ~~Save every event without losing anything if it crashes~~ 
 3. ~~Run it 24/7 in the cloud, with files going to S3~~
-4. Make the saved data queryable with SQL
+4. ~~Make the saved data queryable with SQL~~
 5. Clean it up into proper tables (dedupe, handle deletes, late events)
 6. Build the product metrics on top
 7. Add monitoring so I know when something breaks
@@ -66,7 +68,7 @@ uv run upload --bucket <bucket>   # copy finished hourly files to S3
 uv run pytest                     # run the tests
 ```
 
-The AWS setup lives in `infra/aws/` as Terraform.
+The AWS setup lives in `infra/aws/` as Terraform. The SQL in `sql/` gets saved into Athena by Terraform: open the Athena query editor, pick the `bluesky-stream-analytics` workgroup, run `create-events-view` once, then any of the checks.
 
 ## More detail
 
@@ -74,6 +76,7 @@ The AWS setup lives in `infra/aws/` as Terraform.
 - [End-to-end pipeline](docs/architectures/end-to-end-pipeline.md): how the pieces fit together
 - [Collector](docs/architectures/collector.md): saving every event and surviving crashes
 - [Uploader](docs/architectures/uploader.md): getting files safely into S3
+- [Query layer](docs/architectures/query-layer.md): SQL on the raw files with Athena
 - [Infrastructure](docs/architectures/infrastructure.md): the Oracle server and the AWS side
 
 **Decisions**

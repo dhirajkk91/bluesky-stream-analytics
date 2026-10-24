@@ -44,6 +44,19 @@ resource "aws_s3_bucket_lifecycle_configuration" "raw" {
       days_after_initiation = 1
     }
   }
+
+  rule {
+    id     = "expire-athena-results"
+    status = "Enabled"
+
+    filter {
+      prefix = "athena-results/"
+    }
+
+    expiration {
+      days = 7
+    }
+  }
 }
 
 # Refuse any request that isn't over HTTPS.

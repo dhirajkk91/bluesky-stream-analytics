@@ -20,3 +20,15 @@ variable "monthly_budget_usd" {
   type        = number
   default     = 10
 }
+
+variable "collection_start_date" {
+  description = "First date with raw event files (yyyy-MM-dd)."
+  type        = string
+  default     = "2026-10-24"
+}
+
+variable "athena_scan_limit_bytes" {
+  description = "Maximum bytes a single Athena query may scan."
+  type        = number
+  default     = 10737418240
+}
