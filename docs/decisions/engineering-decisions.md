@@ -94,3 +94,25 @@ The collector and uploader run as plain systemd units from a git checkout.
 ## D-013: The uploader's key lives in a root-only file read by systemd
 
 `/etc/bluesky/upload.env` is owned by root with mode `600`. systemd reads it as root and passes the values to the uploader as environment variables, so the `bluesky` user can't read the file itself, and the key is never in the repo or in shell history.
+
+## D-014: The raw table keeps each event as one JSON string
+
+`raw_events` has a single `line` column, and a view extracts the fields used for exploring.
+
+**Why:** Bluesky records are deeply nested and change as Bluesky and other apps add fields. A fixed schema at this layer would fail or silently drop fields when that happens. Keeping the line as-is matches D-001: the raw layer is exactly the files.
+
+**Cost:** every query parses JSON, which is slower than reading typed columns. Fine for exploring; metrics will be built on typed tables.
+
+## D-015: Partition projection instead of a crawler
+
+The table describes the `date=…/hour=…` layout and Athena computes the partitions at query time.
+
+**Why:** new hours are queryable the moment they're uploaded, with nothing to schedule, run or forget. A crawler would cost money and lag behind; registering partitions by hand would be another job to keep alive.
+
+**Cost:** the layout is fixed in the table definition. Changing the folder pattern means changing the table too.
+
+## D-016: Every query runs in a workgroup with a scan limit
+
+The workgroup stops any query that would read more than 10 GB (about $0.05) and its settings override the client's.
+
+**Why:** Athena charges by bytes read, and one query without a date filter over months of data could scan hundreds of gigabytes. The limit makes that a failed query instead of a bill.

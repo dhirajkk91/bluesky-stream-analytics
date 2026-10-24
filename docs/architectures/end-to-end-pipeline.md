@@ -6,6 +6,7 @@ The pipeline turns Bluesky's public Jetstream feed into raw hourly files in S3, 
 
 - [Collector](collector.md): connecting, writing hourly files, resuming after a crash
 - [Uploader](uploader.md): moving finished files to S3
+- [Query layer](query-layer.md): SQL on the raw files with Athena
 - [Infrastructure](infrastructure.md): the Oracle server and the AWS resources
 
 ## Design
@@ -22,17 +23,20 @@ flowchart LR
 
     subgraph AWS["AWS, us-east-1"]
         S3[("S3<br/>raw/events/date=…/hour=…")]
+        A["Athena<br/>SQL over the raw files"]
     end
 
     J -->|"WebSocket<br/>one JSON event per message"| C
     C -->|"append, compress<br/>when the hour ends"| F
     U -->|"finished files only"| F
     U -->|"checksummed,<br/>never overwrites"| S3
+    A -->|"reads"| S3
 ```
 
 1. **Collect.** `collect` keeps one WebSocket open to a fixed Jetstream server and appends every event, exactly as received, to the current hour's file. Every 5 seconds it syncs the file to disk and then saves its position. After a crash it repairs any half-written file and resumes 5 seconds before its last saved position.
 2. **Finish the hour.** When an event from the next hour arrives, the current file is compressed with zstd and becomes read-only from then on.
 3. **Upload.** Every 10 minutes `upload` sends each finished file to S3 under the same path, with a checksum S3 verifies, and deletes the local copy only after S3 confirms.
+4. **Query.** Athena reads the files in place through a Glue table, so every uploaded hour can be explored with SQL straight away.
 
 There is also `watch`, which prints a live summary of the stream and saves nothing. It's for checking the feed from any machine.
 
@@ -70,6 +74,7 @@ src/bluesky_stream_analytics/
     upload.py    copies finished files to S3, then deletes them locally
     fs.py        helper for durable renames
 tests/           unit and end-to-end tests
-infra/aws/       Terraform for the bucket, the uploader's IAM user and the budget
+infra/aws/       Terraform for the bucket, the uploader's IAM user, the budget, the Glue table and the Athena workgroup
+sql/             the events view and the check queries
 deploy/systemd/  service and timer units for the server
 ```

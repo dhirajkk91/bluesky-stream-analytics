@@ -51,3 +51,34 @@ Checked on the Oracle server after setup:
 | Memory | About 90 MB |
 | Reboot | systemd stopped the collector cleanly (no recovery needed), started it again on boot, and it resumed 5 seconds before its last saved event. The first minute after boot ran at about 650 events per second while it caught up on the minute the server was down, then settled back to normal |
 | Upload | The timer's first run uploaded the hour file finished at shutdown (11.1 MB) with the upload-only IAM user. Running it again found nothing to do |
+
+## First checks in SQL
+
+The saved Athena queries in `sql/checks/`, run over the first 4 hours 45 minutes on the server (18:14 to 23:00 UTC):
+
+| dt | hr | Rows stored | Distinct events | Duplicates |
+|---|---|---|---|---|
+| 2026-10-24 | 18 | 1,176,934 | 1,174,635 | 2,299 |
+| 2026-10-24 | 19 | 1,564,621 | 1,564,621 | 0 |
+| 2026-10-24 | 20 | 1,536,315 | 1,532,044 | 4,271 |
+| 2026-10-24 | 21 | 1,533,174 | 1,533,174 | 0 |
+| 2026-10-24 | 22 | 1,497,721 | 1,497,721 | 0 |
+
+- **Missing minutes:** none, including across the reboot.
+- **Hour 18:** the 2,299 duplicates are the reboot's 5-second rewind, at about 460 events per second.
+- **Hour 20:** the collector's log shows the Jetstream connection dropped twice ("no close frame received or sent"), 50 seconds apart. Each time it reconnected within a second with the 5-second rewind, which accounts for the 4,271 duplicates, and no minute is missing.
+- **Hours with no restart or reconnect:** zero duplicates.
+
+Event mix over the same window:
+
+| Record type | Operation | Share |
+|---|---|---|
+| `app.bsky.feed.like` | create | 66.27% |
+| `app.bsky.feed.repost` | create | 11.12% |
+| `app.bsky.feed.post` | create | 9.44% |
+| `app.bsky.graph.follow` | create | 7.01% |
+| `app.bsky.feed.like` | delete | 1.06% |
+| `app.bsky.graph.follow` | delete | 1.05% |
+| `app.bsky.feed.post` | delete | 0.47% |
+
+Account and identity events were under 0.1% each. Record types from other apps on the network (for example `place.stream.livestream`) show up at well under 0.1% each.
