@@ -11,6 +11,7 @@
 | Crash recovery | A half-written last line is cut off and every complete line kept, a crash after compression, leftover temp and empty files |
 | Collector, end to end | Against a fake Jetstream on localhost that honours `?cursor=`: collects everything, survives a dropped connection, restarts from the saved cursor, resumes from recovered data newer than the cursor |
 | Uploader | Against a fake S3: exact bytes stored, an existing object is never overwritten, a failed upload keeps the local copy, one failure doesn't stop the rest |
+| Background compression | A rollover returns without waiting for compression, close waits for it, and a failed compression is raised and leaves the `.open` file for recovery. End to end, a failed compression stops the collector with its cursor saved |
 | Uploader request shape | Against botocore's own S3 model, so a wrong parameter name or a mishandled `412` fails the test |
 
 ## Kill test
@@ -82,3 +83,14 @@ Event mix over the same window:
 | `app.bsky.feed.post` | delete | 0.47% |
 
 Account and identity events were under 0.1% each. Record types from other apps on the network (for example `place.stream.livestream`) show up at well under 0.1% each.
+
+## Compression stall
+
+Compressing a finished hour originally ran on the collector's event loop. Measured on a 400 MB file of realistic events (97 MB compressed):
+
+| | Compression time | Longest event-loop pause |
+|---|---|---|
+| On the event loop | 2.6 s | 2,629 ms |
+| On a background thread | 2.6 s | 1.1 ms |
+
+On the server the hourly file is about 1 GB, which showed up in the log as a 10-second pause at the top of the hour ([D-017](../decisions/engineering-decisions.md#d-017-compress-finished-hours-on-a-background-thread)).

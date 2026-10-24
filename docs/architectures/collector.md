@@ -69,7 +69,7 @@ stateDiagram-v2
     direction LR
     [*] --> Open: first event of a new hour
     Open --> Open: append events
-    Open --> Compressing: next hour starts / shutdown
+    Open --> Compressing: next hour starts / shutdown<br/>(closed and synced, then compressed<br/>on a background thread)
     Compressing --> Finished: synced, renamed to .jsonl.zst
     Finished --> [*]: uploaded and deleted
     Open --> Recovering: process killed
@@ -77,7 +77,7 @@ stateDiagram-v2
 ```
 
 1. During its hour, events are appended to `<name>.jsonl.open`, uncompressed.
-2. When the next hour starts, or on shutdown, it's compressed to `<name>.jsonl.zst.tmp`, synced, renamed to `<name>.jsonl.zst`, and the `.open` file is deleted.
+2. When the next hour starts, or on shutdown, the file is flushed, synced and closed on the main loop, so its events are on disk before anything else happens. A background thread then compresses it to `<name>.jsonl.zst.tmp`, syncs it, renames it to `<name>.jsonl.zst` and deletes the `.open` file. The main loop keeps reading events meanwhile; on shutdown it waits for the compression to finish.
 3. If the process dies before that, the next start-up recovers it:
    - a `.zst.tmp` is an unfinished compression, so it's deleted;
    - an `.open` whose `.zst` already exists means the crash came after compression, so the `.open` is deleted;
@@ -94,3 +94,4 @@ Appending uncompressed until the hour is over means a crash can only ever damage
 | Connection drops | Reconnects with backoff, resuming from the newest written event |
 | Cursor file unreadable | Stops with an error instead of starting from live, which would leave a gap |
 | Unreadable message (no `time_us`) | Skipped and counted in the status log |
+| Compression fails (for example, disk full) | The collector stops with the error and saves its cursor. systemd restarts it, and recovery compresses the leftover `.open` file |

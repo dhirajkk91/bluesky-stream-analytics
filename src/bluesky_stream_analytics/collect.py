@@ -89,12 +89,15 @@ class Collector:
                 task.cancel()
             await asyncio.gather(*tasks, return_exceptions=True)
 
-            final_time_us = self.writer.close()
-            if final_time_us is None:
-                log.info("Stopped. No events were written.")
-            else:
-                save_cursor(self.cursor_path, final_time_us)
-                log.info("Stopped. Cursor saved at %d", final_time_us)
+            try:
+                self.writer.close()
+            finally:
+                final_time_us = self.writer.last_synced_time_us
+                if final_time_us is None:
+                    log.info("Stopped. No events were written.")
+                else:
+                    save_cursor(self.cursor_path, final_time_us)
+                    log.info("Stopped. Cursor saved at %d", final_time_us)
 
         for task in done:
             if not task.cancelled() and task.exception() is not None:
@@ -133,10 +136,11 @@ class Collector:
         self._events_since_status += 1
 
     async def _housekeeping(self) -> None:
-        """Sync data and save the cursor every SYNC_INTERVAL_SECONDS; log status every STATUS_INTERVAL_SECONDS."""
+        """Sync data and save the cursor every SYNC_INTERVAL_SECONDS, stop on a failed compression, log status every STATUS_INTERVAL_SECONDS."""
         last_status = time.monotonic()
         while True:
             await asyncio.sleep(SYNC_INTERVAL_SECONDS)
+            self.writer.check()
             synced_time_us = self.writer.sync()
             if synced_time_us is not None:
                 save_cursor(self.cursor_path, synced_time_us)

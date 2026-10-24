@@ -160,3 +160,27 @@ def test_resumes_from_recovered_data_when_newer_than_cursor(tmp_path):
     newest_recovered = START_US + 199 * 10_000
     assert fake.cursors_requested == [newest_recovered - collect.REWIND_SECONDS * 1_000_000]
     assert set(collected_time_us(tmp_path)) == {json.loads(raw)["time_us"] for raw in EVENTS}
+
+
+def test_failed_compression_stops_the_collector_and_saves_the_cursor(tmp_path, monkeypatch):
+    from bluesky_stream_analytics import writer as writer_module
+
+    def broken_finalize(path):
+        raise OSError("disk full")
+
+    monkeypatch.setattr(writer_module, "finalize_open_file", broken_finalize)
+
+    async def scenario():
+        fake = FakeJetstream()
+        async with await serve_fake(fake) as server:
+            collector = Collector(tmp_path, url_of(server))
+            with pytest.raises(OSError, match="disk full"):
+                await asyncio.wait_for(collector.run(), timeout=5)
+            return collector
+
+    collector = asyncio.run(scenario())
+
+    saved = load_cursor(tmp_path / "state" / "cursor.json")
+    assert saved == collector.writer.last_synced_time_us
+    assert saved >= START_US + 500 * 10_000  # past the hour boundary
+    assert list(tmp_path.rglob("*.jsonl.open"))  # left for recovery on the next start
