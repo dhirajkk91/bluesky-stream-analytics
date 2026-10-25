@@ -70,7 +70,7 @@ uv run upload --bucket <bucket>   # copy finished hourly files to S3
 uv run pytest                     # run the tests
 ```
 
-The Spark job needs Java 17 or newer and the Iceberg jars:
+The Spark job needs Java 17 or 21 (Spark 4.1 doesn't run on newer versions) and the Iceberg jars:
 
 ```bash
 ./deploy/fetch-jars.sh                                       # download the Iceberg jars into .jars/

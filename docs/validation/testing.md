@@ -2,7 +2,7 @@
 
 ## Automated tests
 
-`uv run pytest` runs everything below. None of it needs a network connection or an AWS account. The Spark tests need Java 17 or newer, and the Iceberg ones need the runtime jar in `.jars/` (`deploy/fetch-jars.sh` downloads it); without the jar they're skipped.
+`uv run pytest` runs everything below. None of it needs a network connection or an AWS account. The Spark tests need Java 17 or 21, and the Iceberg ones need the runtime jar in `.jars/` (`deploy/fetch-jars.sh` downloads it); without the jar they're skipped.
 
 | Area | What's checked |
 |---|---|
