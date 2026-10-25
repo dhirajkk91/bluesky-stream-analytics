@@ -1,0 +1,20 @@
+[Unit]
+Description=Append uploaded Bluesky event files to the event store
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+User=bluesky
+Group=bluesky
+WorkingDirectory=/var/lib/bluesky
+EnvironmentFile=/etc/bluesky/process.env
+ExecStart=/opt/bluesky-stream-analytics/.venv/bin/process --warehouse s3://${BUCKET}/warehouse --data-dir /var/lib/bluesky --jars-dir /opt/bluesky-stream-analytics/.jars
+Environment=PYTHONUNBUFFERED=1
+Nice=10
+MemoryMax=6G
+StateDirectory=bluesky
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=read-only

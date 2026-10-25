@@ -2,7 +2,7 @@
 
 ## Automated tests
 
-`uv run pytest` runs everything below. None of it needs a network connection or an AWS account.
+`uv run pytest` runs everything below. None of it needs a network connection or an AWS account. The Spark tests need Java 17 or 21, and the Iceberg ones need the runtime jar in `.jars/` (`deploy/fetch-jars.sh` downloads it); without the jar they're skipped.
 
 | Area | What's checked |
 |---|---|
@@ -10,9 +10,13 @@
 | Writer | Rollover at the hour boundary, an earlier-hour event stays in the current file, compressed output matches the input, unique file names per run |
 | Crash recovery | A half-written last line is cut off and every complete line kept, a crash after compression, leftover temp and empty files |
 | Collector, end to end | Against a fake Jetstream on localhost that honours `?cursor=`: collects everything, survives a dropped connection, restarts from the saved cursor, resumes from recovered data newer than the cursor |
-| Uploader | Against a fake S3: exact bytes stored, an existing object is never overwritten, a failed upload keeps the local copy, one failure doesn't stop the rest |
+| Uploader | Against a fake S3: exact bytes stored, an existing object is never overwritten, the local copy moves to `uploaded/` only after S3 has it, one failure doesn't stop the rest |
 | Background compression | A rollover returns without waiting for compression, close waits for it, and a failed compression is raised and leaves the `.open` file for recovery. End to end, a failed compression stops the collector with its cursor saved |
 | Uploader request shape | Against botocore's own S3 model, so a wrong parameter name or a mishandled `412` fails the test |
+| Event parsing | Real-shaped likes, reposts, follows, posts, deletes, identity and account events become the right typed columns. Post text never comes through, unreadable lines are dropped, `event_time` is UTC, and only true repeats are removed |
+| Event store load, end to end | Against a local Iceberg catalog: loads files and deletes them, loading the same events again adds nothing, a restart's rewind into the next hour's file is matched against the earlier hour, each batch is its own commit, rows are partitioned by event hour |
+| Merge stays within its hours | An earlier hour's data files are deleted from disk before the next load. The merge still succeeds, so it isn't reading them. The same setup with overlapping hours fails, which shows the check works |
+| Backfill download | Only finished files under the requested day or hour, across pages of results, and nothing already waiting locally is downloaded again |
 
 ## Kill test
 
@@ -94,3 +98,12 @@ Compressing a finished hour originally ran on the collector's event loop. Measur
 | On a background thread | 2.6 s | 1.1 ms |
 
 On the server the hourly file is about 1 GB, which showed up in the log as a 10-second pause at the top of the hour ([D-017](../decisions/engineering-decisions.md#d-017-compress-finished-hours-on-a-background-thread)).
+
+The collector's log at the top of the hour on the server, before and after the change:
+
+| | Before (00:00 UTC) | After (01:00 UTC) |
+|---|---|---|
+| Next hour's file started | 00:00:10 | 01:00:00 |
+| Previous hour's file finished | before the next one started | 01:00:09, after the next one started |
+
+Compressing the hour still takes about 9 seconds, but it now happens next to the stream instead of in front of it. The status line covering the change read 25,937 events in 61 s, 0.1 s behind live, in line with the minutes around it.

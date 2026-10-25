@@ -1,0 +1,9 @@
+[Unit]
+Description=Append uploaded Bluesky event files to the event store every hour
+
+[Timer]
+OnCalendar=*:20
+Persistent=true
+
+[Install]
+WantedBy=timers.target

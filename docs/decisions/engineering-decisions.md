@@ -124,3 +124,74 @@ The workgroup stops any query that would read more than 10 GB (about $0.05) and 
 **Fix:** the file is still closed and synced on the main loop, then a single background thread compresses it. Python's zstd releases the interpreter lock while it works, so the loop keeps running. On a 400 MB test file, the longest pause in the event loop went from 2,629 ms to 1.1 ms.
 
 **Safety:** the cursor only counts events that were synced before the file was handed off, shutdown waits for compression to finish, and a failed compression stops the collector so systemd restarts it and recovery redoes the work.
+
+## D-018: Event-sourced, not medallion
+
+The architecture is an event log with derived read models: raw event log → event store → projections → marts. It isn't bronze, silver and gold.
+
+**Why:** Jetstream is a stream of changes to records, not snapshots of data. The question that matters most is "what happened" versus "what is true now", and event sourcing makes that the main boundary:
+
+- The event store is append-only, so it's a full history that can be replayed.
+- Projections fold events in order (create, update, delete) into current state, and can be dropped and rebuilt from the store at any time.
+- Deletes have one obvious home. The log records that a delete happened, and every projection removes the deleted record.
+
+Reads and writes are split in the CQRS sense: the store is shaped for appending, and each projection or mart is shaped for its queries. The marts use Kimball dimensional modeling (facts and dimensions, with SCD type 2 for account history).
+
+**Why not medallion:** it organizes data by how clean it is, which suits batch and snapshot sources better than a stream of changes.
+
+**What it isn't:** processing is hourly micro-batches over a replayable file log, not a stream processor, so it isn't Kappa or Lambda.
+
+## D-019: Spark in local mode on the server
+
+The job that loads the event store is PySpark running on the Oracle server in local mode (one machine, every core), started by a systemd timer.
+
+**Honestly:** this data doesn't need Spark. An hour is about 1.5 million events, roughly 1 GB of JSON, and DuckDB or Polars on one machine would handle it, probably faster, since Spark spends several seconds just starting. I picked Spark because the compute is free on the server, it writes Iceberg tables with `MERGE` well, and the same job would run on a cluster (EMR, Glue) unchanged if the volume grew 100 times.
+
+**Alternatives:**
+
+- Athena SQL alone, writing Iceberg with `MERGE`. Cheapest and simplest, about $2 a month, but no Spark anywhere in the project.
+- AWS Glue jobs or EMR Serverless. Managed Spark, but around $20 a month for an hourly job, twice the budget.
+
+**Limits:** the job shares 2 cores and 12 GB with the collector. It runs at a lower CPU priority with a 6 GB memory cap, so the collector always wins.
+
+## D-020: Iceberg tables in the Glue catalog
+
+The event store, and later the projections and marts, are Iceberg tables stored under `warehouse/` in the same bucket, registered in Glue (`bluesky_store` for the event store), and queried with Athena.
+
+**Why Iceberg:** honoring deletes means removing single rows from the projections' files in S3. Plain Parquet would need hand-written code to find and rewrite the right files. Iceberg does row-level `MERGE` and `DELETE`, every write is all-or-nothing, and old versions stay readable until they're expired. Athena reads and writes it natively. Delta Lake and Hudi would also work, but Iceberg has the best support on AWS.
+
+**Format v2, set explicitly,** because that's what Athena supports today. The job creates its own tables; Terraform only makes the database and the job's permissions.
+
+## D-021: Hourly, insert-only merge limited to the batch's time range
+
+Every hour the job loads whatever the uploader has handed over and runs `MERGE … WHEN NOT MATCHED THEN INSERT`, joining on the event key and on the batch's `event_time` range.
+
+- **Insert-only** because an event never changes once it's sent. A repeat is the same event delivered again, so there's nothing to update.
+- **Limited to the batch's range** so the merge only reads the table files that could hold a match: the hour being loaded, plus the previous one after a restart's rewind. A test deletes an earlier hour's files and checks the merge still succeeds, so it can't be quietly scanning the whole table.
+- **Hourly rather than daily:** both cost the same, since the compute is free and the reads are the same in total. Hourly keeps data about 1.5 hours fresh instead of up to 2 days, and keeps a failed run's impact to one hour. Daily metrics in later layers will run daily.
+
+Loading the same files twice adds nothing, so a crash at any point is fixed by running again.
+
+## D-022: Process the local copy, not the one in S3
+
+After uploading, the uploader moves the file to `uploaded/` instead of deleting it. The job reads from there and deletes the file after its commit.
+
+**Why:** reading every hour back out of S3 to the server would be about 137 GB a month of data transfer, around $3 a month past AWS's free 100 GB. The local copy is the same bytes, and S3 still has the original for rebuilds.
+
+**Why only `uploaded/`, not `events/`:** a file there is already in S3, and the uploader won't touch it again, so the job never races the uploader and never puts anything into the event store that isn't safely stored first.
+
+**Cost:** if the job is down, files pile up locally (about 5 GB a day, with about 90 GB free). Monitoring will watch that.
+
+## D-023: Raw files kept for 14 days
+
+An S3 lifecycle rule deletes `raw/` files after 14 days.
+
+**Why:** raw files hold full post text, including posts that were later deleted, so expiring them is part of honoring deletes, not just saving money. Fourteen days leaves two weeks to spot a bug and rebuild the event store from raw. Without the rule, raw storage grows about 137 GB a month.
+
+**Cost:** the event store can't be rebuilt from scratch for days older than that, and a field not extracted today can't be added for those days later.
+
+## D-024: No record content in the event store
+
+The events table keeps what metrics need (who, when, what kind, aimed at whom, reply links, languages) and none of the record content: no post text, no profile text, no images or links.
+
+**Why:** content that's deleted on Bluesky would otherwise live on in an append-only log kept for months, where it can't be removed without breaking the log's rule. Nothing planned needs it. Trending topics can come from hashtags, which can be added as their own column when that step comes.

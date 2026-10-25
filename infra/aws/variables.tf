@@ -32,3 +32,9 @@ variable "athena_scan_limit_bytes" {
   type        = number
   default     = 10737418240
 }
+
+variable "raw_retention_days" {
+  description = "Days raw event files are kept in S3."
+  type        = number
+  default     = 14
+}

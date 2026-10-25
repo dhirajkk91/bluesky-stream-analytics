@@ -45,6 +45,21 @@ resource "aws_s3_bucket_lifecycle_configuration" "raw" {
     }
   }
 
+  # Raw files are only needed to rebuild the recent event store, and they hold post
+  # text that must not outlive a delete for long.
+  rule {
+    id     = "expire-raw-events"
+    status = "Enabled"
+
+    filter {
+      prefix = "raw/"
+    }
+
+    expiration {
+      days = var.raw_retention_days
+    }
+  }
+
   rule {
     id     = "expire-athena-results"
     status = "Enabled"
