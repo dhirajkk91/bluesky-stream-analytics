@@ -12,6 +12,7 @@ from bluesky_stream_analytics.upload import (
     sha256_base64,
     upload_all,
     upload_file,
+    uploaded_path,
 )
 
 BUCKET = "test-bucket"
@@ -54,6 +55,14 @@ def test_finished_files_skips_open_and_temporary_files(tmp_path):
     assert finished_files(tmp_path) == [done]
 
 
+def test_finished_files_ignores_uploaded_files(tmp_path):
+    path = make_file(tmp_path, "a.jsonl.zst")
+    target = uploaded_path(tmp_path, path)
+    target.parent.mkdir(parents=True)
+    path.rename(target)
+    assert finished_files(tmp_path) == []
+
+
 def test_finished_files_with_no_data_yet(tmp_path):
     assert finished_files(tmp_path) == []
 
@@ -69,16 +78,22 @@ def test_sha256_base64(tmp_path):
     assert sha256_base64(path) == "ungWv48Bz+pBQUDeXa4iI7ADYaOWF3qctBD/YfIAFa0="
 
 
-def test_upload_stores_exact_bytes_and_deletes_local_copy(tmp_path):
+def test_uploaded_path_keeps_partition_path(tmp_path):
+    path = make_file(tmp_path, "a.jsonl.zst")
+    assert uploaded_path(tmp_path, path) == tmp_path / "uploaded/events/date=2026-10-24/hour=16/a.jsonl.zst"
+
+
+def test_upload_stores_exact_bytes_and_moves_local_copy(tmp_path):
     s3 = FakeS3()
     path = make_file(tmp_path, "a.jsonl.zst", b"raw bytes")
 
     assert upload_file(s3, BUCKET, tmp_path, path) is True
     assert s3.objects == {"raw/events/date=2026-10-24/hour=16/a.jsonl.zst": b"raw bytes"}
     assert not path.exists()
+    assert uploaded_path(tmp_path, path).read_bytes() == b"raw bytes"
 
 
-def test_existing_object_is_not_overwritten_and_local_copy_is_removed(tmp_path):
+def test_existing_object_is_not_overwritten_and_local_copy_is_moved(tmp_path):
     s3 = FakeS3()
     key = "raw/events/date=2026-10-24/hour=16/a.jsonl.zst"
     s3.objects[key] = b"uploaded earlier"
@@ -87,6 +102,7 @@ def test_existing_object_is_not_overwritten_and_local_copy_is_removed(tmp_path):
     assert upload_file(s3, BUCKET, tmp_path, path) is False
     assert s3.objects[key] == b"uploaded earlier"
     assert not path.exists()
+    assert uploaded_path(tmp_path, path).exists()
 
 
 def test_failed_upload_keeps_local_copy(tmp_path):
@@ -96,6 +112,7 @@ def test_failed_upload_keeps_local_copy(tmp_path):
     with pytest.raises(ClientError):
         upload_file(s3, BUCKET, tmp_path, path)
     assert path.exists()
+    assert not uploaded_path(tmp_path, path).exists()
 
 
 def test_upload_all_continues_past_failures_and_counts_them(tmp_path):

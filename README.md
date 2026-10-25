@@ -35,7 +35,9 @@ It now runs around the clock on a free Oracle Cloud ARM server, as a systemd ser
 
 The data in S3 can now be queried with SQL in Athena, straight from the files, with partitions picked up automatically and a cap on what any query can cost. The first checks found no missing minutes, and the only duplicates lined up exactly with a reboot and two dropped connections, which is what the collector is designed to do.
 
-Next up is turning the raw events into proper, clean tables.
+The design is event-sourced rather than the usual bronze/silver/gold: the feed is a log of things that happened, so the log is the source of truth and everything else (current state, metrics) is derived from it and can be rebuilt by replaying it. [Here's why](docs/architectures/end-to-end-pipeline.md#architecture).
+
+Now I'm building that out. The event store is done: an hourly Spark job on the same server appends each finished hour to an Iceberg table in S3, with every event exactly once and no post text. Raw files now expire after 14 days, partly to save money, but mostly because they hold text people may have deleted. Spark is honestly more than this data needs, and [the decision log](docs/decisions/engineering-decisions.md#d-019-spark-in-local-mode-on-the-server) says so and why I used it anyway.
 
 ## The plan
 
@@ -43,8 +45,8 @@ Next up is turning the raw events into proper, clean tables.
 2. ~~Save every event without losing anything if it crashes~~ 
 3. ~~Run it 24/7 in the cloud, with files going to S3~~
 4. ~~Make the saved data queryable with SQL~~
-5. Clean it up into proper tables (dedupe, handle deletes, late events)
-6. Build the product metrics on top
+5. Turn the log into proper tables: an event store with each event once (built), then projections of current state with deletes applied (next)
+6. Build the product metrics on top, as a star schema
 7. Add monitoring so I know when something breaks
 8. Put up the public dashboard
 
@@ -68,6 +70,15 @@ uv run upload --bucket <bucket>   # copy finished hourly files to S3
 uv run pytest                     # run the tests
 ```
 
+The Spark job needs Java 17 or newer and the Iceberg jars:
+
+```bash
+./deploy/fetch-jars.sh                                       # download the Iceberg jars into .jars/
+uv run process --catalog hadoop --warehouse ./warehouse      # append data/uploaded/ to a local Iceberg event store
+uv run process --warehouse s3://<bucket>/warehouse           # the same, into S3 and the Glue catalog
+uv run fetch-raw --bucket <bucket> --date 2026-10-24         # download a day of raw files to load again
+```
+
 The AWS setup lives in `infra/aws/` as Terraform. The SQL in `sql/` gets saved into Athena by Terraform: open the Athena query editor, pick the `bluesky-stream-analytics` workgroup, run `create-events-view` once, then any of the checks.
 
 ## More detail
@@ -76,7 +87,8 @@ The AWS setup lives in `infra/aws/` as Terraform. The SQL in `sql/` gets saved i
 - [End-to-end pipeline](docs/architectures/end-to-end-pipeline.md): how the pieces fit together
 - [Collector](docs/architectures/collector.md): saving every event and surviving crashes
 - [Uploader](docs/architectures/uploader.md): getting files safely into S3
-- [Query layer](docs/architectures/query-layer.md): SQL on the raw files with Athena
+- [Event store](docs/architectures/event-store.md): the Spark job and the table with every event once
+- [Query layer](docs/architectures/query-layer.md): SQL with Athena
 - [Infrastructure](docs/architectures/infrastructure.md): the Oracle server and the AWS side
 
 **Decisions**

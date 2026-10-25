@@ -77,6 +77,7 @@ locals {
     "missing-minutes"    = "checks/missing_minutes.sql"
     "duplicates"         = "checks/duplicates.sql"
     "event-mix"          = "checks/event_mix.sql"
+    "store-vs-raw"       = "checks/store_vs_raw.sql"
   }
 }
 

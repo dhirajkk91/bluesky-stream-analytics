@@ -1,5 +1,5 @@
 -- One row per raw event, with the fields used for exploring the stream. event_time is UTC.
--- Duplicates are kept; they are removed in the clean tables.
+-- Duplicates are kept; the event store holds each event once.
 CREATE OR REPLACE VIEW events AS
 SELECT
     dt,

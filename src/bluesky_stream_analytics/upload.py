@@ -1,9 +1,11 @@
 """
-Upload finished hourly files to S3, then delete the local copy.
+Upload finished hourly files to S3, then hand the local copy to the processor.
 
 Each file keeps its partition path under raw/, for example
 raw/events/date=2026-10-24/hour=16/<name>.jsonl.zst. Uploads carry a SHA-256
 checksum that S3 verifies, and only succeed if the key doesn't exist yet.
+Once S3 has the file, it moves from events/ to uploaded/ under the same path,
+where `process` reads it and deletes it.
 
 Usage:
     uv run upload --bucket <bucket name>
@@ -14,17 +16,20 @@ import argparse
 import base64
 import hashlib
 import logging
+import os
 import sys
 from pathlib import Path
 
 import boto3
 from botocore.exceptions import BotoCoreError, ClientError
 
+from bluesky_stream_analytics.fs import fsync_directory
 from bluesky_stream_analytics.writer import FINAL_SUFFIX
 
 log = logging.getLogger(__name__)
 
 KEY_PREFIX = "raw"
+UPLOADED_DIR = "uploaded"
 
 
 def finished_files(data_dir: Path) -> list[Path]:
@@ -40,6 +45,11 @@ def object_key(data_dir: Path, path: Path) -> str:
     return f"{KEY_PREFIX}/{path.relative_to(data_dir).as_posix()}"
 
 
+def uploaded_path(data_dir: Path, path: Path) -> Path:
+    """Return where a file goes once it's in S3: the same path under uploaded/."""
+    return data_dir / UPLOADED_DIR / path.relative_to(data_dir)
+
+
 def sha256_base64(path: Path) -> str:
     """Return the file's SHA-256 digest, base64-encoded as S3 expects."""
     digest = hashlib.sha256()
@@ -51,10 +61,10 @@ def sha256_base64(path: Path) -> str:
 
 def upload_file(s3, bucket: str, data_dir: Path, path: Path) -> bool:
     """
-    Upload one file, then delete it locally.
+    Upload one file, then move it to uploaded/.
 
     Returns True if it was uploaded now, False if S3 already had it (an earlier
-    run uploaded it but stopped before deleting the local copy).
+    run uploaded it but stopped before moving the local copy).
     """
     key = object_key(data_dir, path)
     with open(path, "rb") as body:
@@ -72,8 +82,15 @@ def upload_file(s3, bucket: str, data_dir: Path, path: Path) -> bool:
                 raise
             uploaded = False
 
-    path.unlink()
+    _move(path, uploaded_path(data_dir, path))
     return uploaded
+
+
+def _move(source: Path, target: Path) -> None:
+    target.parent.mkdir(parents=True, exist_ok=True)
+    os.replace(source, target)
+    fsync_directory(target.parent)
+    fsync_directory(source.parent)
 
 
 def _already_exists(exc: ClientError) -> bool:
@@ -93,7 +110,7 @@ def upload_all(s3, bucket: str, data_dir: Path) -> int:
             failed += 1
             log.error("Failed %s: %s", path.relative_to(data_dir), exc)
             continue
-        status = "Uploaded" if uploaded else "Already in S3, removed local copy of"
+        status = "Uploaded" if uploaded else "Already in S3, moved local copy of"
         log.info("%s %s (%s bytes)", status, path.relative_to(data_dir), f"{size:,}")
     return failed
 
