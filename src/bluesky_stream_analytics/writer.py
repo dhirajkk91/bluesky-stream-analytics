@@ -3,6 +3,7 @@ Write raw events to hourly JSON Lines files, compressed with zstd once each hour
 
 Layout: <root>/events/date=YYYY-MM-DD/hour=HH/<first time_us>_<session>.jsonl.zst
 The active hour is an uncompressed .jsonl.open file, so a crash can only damage its last line.
+Finished hours are compressed on a background thread so writing never waits for it.
 """
 
 import json
@@ -10,6 +11,7 @@ import logging
 import os
 import secrets
 import shutil
+from concurrent.futures import Future, ThreadPoolExecutor
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from pathlib import Path
@@ -46,6 +48,9 @@ class HourlyFileWriter:
         self._path: Path | None = None
         self._file = None
         self._last_written_time_us: int | None = None
+        self._last_synced_time_us: int | None = None
+        self._compressor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="compress")
+        self._pending: list[Future] = []
 
     def write(self, raw: str, time_us: int) -> None:
         """Append one raw event. Events from an earlier hour go into the current file."""
@@ -64,17 +69,43 @@ class HourlyFileWriter:
         if self._file is not None:
             self._file.flush()
             os.fsync(self._file.fileno())
-        return self._last_written_time_us
+        self._last_synced_time_us = self._last_written_time_us
+        return self._last_synced_time_us
+
+    def check(self) -> None:
+        """Raise the error of any background compression that has failed."""
+        running = []
+        for future in self._pending:
+            if future.done():
+                future.result()
+            else:
+                running.append(future)
+        self._pending = running
+
+    def drain(self) -> None:
+        """Wait for all background compression to finish, raising the first failure."""
+        pending, self._pending = self._pending, []
+        for future in pending:
+            future.result()
 
     def close(self) -> int | None:
-        """Finish the current file and return the newest time_us written."""
-        self._finish_current_file()
-        return self._last_written_time_us
+        """Finish the current file, wait for compression, and return the newest time_us on disk."""
+        try:
+            self._finish_current_file()
+            self.drain()
+        finally:
+            self._compressor.shutdown(wait=True)
+        return self._last_synced_time_us
 
     @property
     def last_written_time_us(self) -> int | None:
         """Newest time_us written, synced or not."""
         return self._last_written_time_us
+
+    @property
+    def last_synced_time_us(self) -> int | None:
+        """Newest time_us known to be on disk."""
+        return self._last_synced_time_us
 
     def _start_file(self, hour: datetime, first_time_us: int) -> None:
         directory = partition_dir(self.root, hour)
@@ -92,8 +123,12 @@ class HourlyFileWriter:
         os.fsync(self._file.fileno())
         self._file.close()
         self._file = None
-        finalize_open_file(self._path)
-        log.info("Finished %s", final_path_for(self._path).relative_to(self.root))
+        self._last_synced_time_us = self._last_written_time_us
+        self._pending.append(self._compressor.submit(self._compress, self._path))
+
+    def _compress(self, open_path: Path) -> None:
+        finalize_open_file(open_path)
+        log.info("Finished %s", final_path_for(open_path).relative_to(self.root))
 
 
 def final_path_for(open_path: Path) -> Path:

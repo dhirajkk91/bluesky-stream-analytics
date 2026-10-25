@@ -48,7 +48,8 @@ def test_rolls_over_to_a_new_file_at_the_hour_boundary(tmp_path):
     writer.write(event(BEFORE_BOUNDARY_US), BEFORE_BOUNDARY_US)
     writer.write(event(AFTER_BOUNDARY_US), AFTER_BOUNDARY_US)
 
-    # The 13:00 file is finished as soon as the first 14:00 event arrives.
+    # The 13:00 file is handed to compression as soon as the first 14:00 event arrives.
+    writer.drain()
     assert [p.parent.name for p in finished_files(tmp_path)] == ["hour=13"]
 
     writer.close()
@@ -153,3 +154,63 @@ def test_recovery_removes_incomplete_compression_and_empty_files(tmp_path):
     assert recovery.files == []
     assert recovery.newest_time_us is None
     assert list(directory.iterdir()) == []
+
+
+def test_rollover_does_not_wait_for_compression(tmp_path, monkeypatch):
+    import time
+
+    from bluesky_stream_analytics import writer as writer_module
+
+    real_finalize = writer_module.finalize_open_file
+
+    def slow_finalize(path):
+        time.sleep(0.5)
+        return real_finalize(path)
+
+    monkeypatch.setattr(writer_module, "finalize_open_file", slow_finalize)
+    writer = HourlyFileWriter(tmp_path)
+    writer.write(event(BEFORE_BOUNDARY_US), BEFORE_BOUNDARY_US)
+
+    started = time.monotonic()
+    writer.write(event(AFTER_BOUNDARY_US), AFTER_BOUNDARY_US)
+    assert time.monotonic() - started < 0.2
+
+    writer.close()
+    assert [p.parent.name for p in finished_files(tmp_path)] == ["hour=13", "hour=14"]
+
+
+def test_failed_compression_is_raised_and_keeps_the_file(tmp_path, monkeypatch):
+    from bluesky_stream_analytics import writer as writer_module
+
+    def broken_finalize(path):
+        raise OSError("disk full")
+
+    monkeypatch.setattr(writer_module, "finalize_open_file", broken_finalize)
+    writer = HourlyFileWriter(tmp_path)
+    writer.write(event(BEFORE_BOUNDARY_US), BEFORE_BOUNDARY_US)
+    writer.write(event(AFTER_BOUNDARY_US), AFTER_BOUNDARY_US)
+
+    with pytest.raises(OSError, match="disk full"):
+        writer.drain()
+    assert len(list(tmp_path.rglob("*.jsonl.open"))) == 2
+    assert writer.last_synced_time_us == BEFORE_BOUNDARY_US
+
+    with pytest.raises(OSError, match="disk full"):
+        writer.close()
+    assert writer.last_synced_time_us == AFTER_BOUNDARY_US
+
+
+def test_check_raises_once_a_failed_compression_has_finished(tmp_path, monkeypatch):
+    from bluesky_stream_analytics import writer as writer_module
+
+    def broken_finalize(path):
+        raise OSError("disk full")
+
+    monkeypatch.setattr(writer_module, "finalize_open_file", broken_finalize)
+    writer = HourlyFileWriter(tmp_path)
+    writer.write(event(BEFORE_BOUNDARY_US), BEFORE_BOUNDARY_US)
+    writer.write(event(AFTER_BOUNDARY_US), AFTER_BOUNDARY_US)
+    writer._pending[0].exception(timeout=5)
+
+    with pytest.raises(OSError, match="disk full"):
+        writer.check()

@@ -116,3 +116,11 @@ The table describes the `date=…/hour=…` layout and Athena computes the parti
 The workgroup stops any query that would read more than 10 GB (about $0.05) and its settings override the client's.
 
 **Why:** Athena charges by bytes read, and one query without a date filter over months of data could scan hundreds of gigabytes. The limit makes that a failed query instead of a bill.
+
+## D-017: Compress finished hours on a background thread
+
+**Found in production:** the collector's log showed the previous hour's file finishing 10 seconds into the next hour, and that minute's status line covering 64 seconds. Compressing about 1 GB ran on the event loop, so for about 10 seconds every hour nothing was read from Jetstream. No events were lost (they waited in the connection), but the pause grows with volume, and if it ever outlasted the connection's keep-alive it would cause the disconnects it's meant to avoid.
+
+**Fix:** the file is still closed and synced on the main loop, then a single background thread compresses it. Python's zstd releases the interpreter lock while it works, so the loop keeps running. On a 400 MB test file, the longest pause in the event loop went from 2,629 ms to 1.1 ms.
+
+**Safety:** the cursor only counts events that were synced before the file was handed off, shutdown waits for compression to finish, and a failed compression stops the collector so systemd restarts it and recovery redoes the work.
