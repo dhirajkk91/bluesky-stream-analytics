@@ -78,6 +78,10 @@ locals {
     "duplicates"         = "checks/duplicates.sql"
     "event-mix"          = "checks/event_mix.sql"
     "store-vs-raw"       = "checks/store_vs_raw.sql"
+
+    "create-current-records-view" = "views/current_records.sql"
+    "create-accounts-view"        = "views/accounts.sql"
+    "projections-vs-store"        = "checks/projections_vs_store.sql"
   }
 }
 

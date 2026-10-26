@@ -76,6 +76,7 @@ uv run pytest                     # run the tests
 uv run process --catalog local --database events.duckdb      # append data/uploaded/ to a local DuckDB table
 uv run process --warehouse s3://<bucket>/warehouse           # the same, into the Iceberg table in Glue
 uv run fetch-raw --bucket <bucket> --date 2026-10-24         # download a day of raw files to load again
+uv run project --warehouse s3://<bucket>/warehouse           # fold new event-store commits into the projections
 uv run --group bench python benchmarks/compare_engines.py <raw files>   # Spark against DuckDB, needs Java 17 or 21
 ```
 

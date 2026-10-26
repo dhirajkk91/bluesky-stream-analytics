@@ -1,5 +1,5 @@
 [Unit]
-Description=Append uploaded Bluesky event files to the event store every hour
+Description=Append uploaded Bluesky event files to the event store and fold them into the projections, every hour
 
 [Timer]
 OnCalendar=*:20

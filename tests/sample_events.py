@@ -43,6 +43,10 @@ def post(did, rkey, ts, text="hello", langs=("en",), reply_to=None, rev="3rev1")
     return _commit(did, ts, "app.bsky.feed.post", "create", rkey, rev, record)
 
 
+def edit_post(did, rkey, ts, text="edited", langs=("en",), rev="3rev2"):
+    return _commit(did, ts, "app.bsky.feed.post", "update", rkey, rev, {"text": text, "langs": list(langs)})
+
+
 def delete(did, collection, rkey, ts, rev="3rev2"):
     return _commit(did, ts, collection, "delete", rkey, rev)
 
