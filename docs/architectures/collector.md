@@ -32,16 +32,17 @@ flowchart TD
     H --> F
     G -->|"SIGTERM / Ctrl+C"| I["Finish the current file,<br/>save the final cursor"]
 
-    K["Every 5 s: fsync the file,<br/>then save the cursor"] -.-> G
+    K["Every 5 s, on a separate thread:<br/>fsync the file, then save the cursor"] -.-> G
 ```
 
 1. **Recover.** Files left behind by a run that didn't shut down cleanly are finished first (see [A file's life](#a-files-life)).
 2. **Pick a resume point.** The newer of the saved cursor and the newest event found in recovered files. The second matters because events written after the last cursor save are still in the file.
 3. **Connect.** With a resume point, connect with `?cursor=` set 5 seconds before it. Without one, start from live.
 4. **Write.** Each message is parsed just enough to read `time_us`, then the raw text is appended to the current hour's file.
-5. **Checkpoint.** Every 5 seconds a background task forces the file onto disk and only then saves the cursor, so the cursor can never point past data that isn't on disk. Every 60 seconds it logs events received, the rate, and how far behind live it is.
-6. **Reconnect.** If the connection drops, it waits (doubling up to 60 seconds, randomized within each step) and resumes from the newest event already written, minus the rewind. The wait resets after a successful connection.
-7. **Shut down.** `SIGTERM` or Ctrl+C cancels the connection, finishes the current file and saves the final cursor.
+5. **Checkpoint.** Every 5 seconds the main loop hands the buffered events to the operating system, and a separate thread forces them onto disk and only then saves the cursor, so the cursor can never point past data that isn't on disk. The main loop keeps reading events while the disk catches up, which matters when another job is keeping the disk busy ([D-027](../decisions/engineering-decisions.md#d-027-sync-to-disk-on-its-own-thread)).
+6. **Status.** Every 60 seconds it logs events received, the rate, how far behind live it is, the longest sync and the longest pause of the main loop in that minute. A sync over 1 second, or the main loop being blocked for 2 seconds or more, is logged as a warning straight away.
+7. **Reconnect.** If the connection drops, it waits (doubling up to 60 seconds, randomized within each step) and resumes from the newest event already written, minus the rewind. The wait resets after a successful connection.
+8. **Shut down.** `SIGTERM` or Ctrl+C cancels the connection, waits for a sync in progress, finishes the current file and saves the final cursor.
 
 ## What is stored
 
@@ -91,7 +92,8 @@ Appending uncompressed until the hour is over means a crash can only ever damage
 |---|---|
 | Process killed mid-write | Recovery keeps every complete line, drops the partial one, and resumes from the newest saved event minus 5 seconds |
 | Killed before the first cursor save | No cursor yet, but recovery finds the newest event in the file and resumes from there |
-| Connection drops | Reconnects with backoff, resuming from the newest written event |
+| Connection drops | Reconnects with backoff, resuming from the newest written event. How often drops happen, and a pattern in when, is in [testing](../validation/testing.md#connection-drops-and-heavy-jobs) |
 | Cursor file unreadable | Stops with an error instead of starting from live, which would leave a gap |
 | Unreadable message (no `time_us`) | Skipped and counted in the status log |
+| Disk slow to sync, for example while another job is busy with it | The sync waits on its own thread while events keep being read. Slow syncs and any pause of the main loop are logged |
 | Compression fails (for example, disk full) | The collector stops with the error and saves its cursor. systemd restarts it, and recovery compresses the leftover `.open` file |

@@ -39,7 +39,7 @@ The design is event-sourced rather than the usual bronze/silver/gold: the feed i
 
 The event store is done: an hourly job on the same server appends each finished hour to an Iceberg table in S3, with every event exactly once and no post text. Raw files now expire after 14 days, partly to save money, but mostly because they hold text people may have deleted.
 
-I built the job in Spark first, then ran the same work through DuckDB on a real hour: identical output, 11 seconds instead of 82. So it runs on DuckDB now, and [the decision log](docs/decisions/engineering-decisions.md#d-025-duckdb-for-the-hourly-job) has the numbers. Measuring the table's columns also showed one unused hash was 42% of its size, so that's gone too.
+I built the job in Spark first, then ran the same work through DuckDB on a real hour: identical output, 11 seconds instead of 82. So it runs on DuckDB now, and each hour loads in 10 to 16 seconds. [The decision log](docs/decisions/engineering-decisions.md#d-025-duckdb-for-the-hourly-job) has the numbers. Measuring the table's columns also showed one unused hash was 42% of its size, so that's gone too, and the table went from 77 bytes an event to 31.
 
 ## The plan
 
@@ -95,5 +95,5 @@ The AWS setup lives in `infra/aws/` as Terraform. The SQL in `sql/` gets saved i
 - [Engineering decisions](docs/decisions/engineering-decisions.md): why I built it this way
 
 **Validation**
-- [Testing](docs/validation/testing.md): tests, the kill test, and the first real run
+- [Testing](docs/validation/testing.md): tests, the kill test, real runs on the server, Spark against DuckDB, and a pattern in connection drops
 - [CI](docs/validation/ci.md)

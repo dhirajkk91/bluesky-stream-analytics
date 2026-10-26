@@ -10,9 +10,11 @@ import argparse
 import asyncio
 import json
 import logging
+import os
 import random
 import signal
 import time
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
 from websockets.asyncio.client import connect
@@ -28,6 +30,9 @@ REWIND_SECONDS = 5
 SYNC_INTERVAL_SECONDS = 5
 STATUS_INTERVAL_SECONDS = 60
 MAX_BACKOFF_SECONDS = 60
+SLOW_SYNC_SECONDS = 1.0
+LOOP_CHECK_SECONDS = 0.5
+LOOP_PAUSE_WARNING_SECONDS = 2.0
 
 
 def build_url(base_url: str, resume_from_us: int | None) -> str:
@@ -43,6 +48,17 @@ def backoff_delay(attempt: int) -> float:
     return random.uniform(ceiling / 2, ceiling)
 
 
+def fsync_and_save(fd: int | None, cursor_path: Path, time_us: int | None) -> None:
+    """Make the written events durable, then save the cursor. Runs on the sync thread."""
+    if fd is not None:
+        try:
+            os.fsync(fd)
+        finally:
+            os.close(fd)
+    if time_us is not None:
+        save_cursor(cursor_path, time_us)
+
+
 class Collector:
     """Streams events into an HourlyFileWriter and keeps the cursor up to date."""
 
@@ -55,6 +71,10 @@ class Collector:
         self._attempt = 0
         self._events_since_status = 0
         self._skipped_since_status = 0
+        self._longest_sync = 0.0
+        self._longest_pause = 0.0
+        # Disk syncs run here so a slow disk never holds up reading the connection.
+        self._syncer = ThreadPoolExecutor(max_workers=1, thread_name_prefix="sync")
 
     def stop(self) -> None:
         """Request a clean shutdown."""
@@ -79,6 +99,7 @@ class Collector:
         tasks = [
             asyncio.create_task(self._stream_forever(resume_from)),
             asyncio.create_task(self._housekeeping()),
+            asyncio.create_task(self._watch_loop()),
             asyncio.create_task(self._stop.wait()),
         ]
         try:
@@ -88,6 +109,8 @@ class Collector:
             for task in tasks:
                 task.cancel()
             await asyncio.gather(*tasks, return_exceptions=True)
+            # A sync still running on its thread must finish before the final cursor save.
+            self._syncer.shutdown(wait=True)
 
             try:
                 self.writer.close()
@@ -136,32 +159,58 @@ class Collector:
         self._events_since_status += 1
 
     async def _housekeeping(self) -> None:
-        """Sync data and save the cursor every SYNC_INTERVAL_SECONDS, stop on a failed compression, log status every STATUS_INTERVAL_SECONDS."""
+        """
+        Every SYNC_INTERVAL_SECONDS: stop on a failed compression, make the written
+        events durable on the sync thread, then save the cursor. Logs status every
+        STATUS_INTERVAL_SECONDS.
+        """
+        loop = asyncio.get_running_loop()
         last_status = time.monotonic()
         while True:
             await asyncio.sleep(SYNC_INTERVAL_SECONDS)
             self.writer.check()
-            synced_time_us = self.writer.sync()
-            if synced_time_us is not None:
-                save_cursor(self.cursor_path, synced_time_us)
+
+            fd, time_us = self.writer.start_sync()
+            started = time.monotonic()
+            await loop.run_in_executor(self._syncer, fsync_and_save, fd, self.cursor_path, time_us)
+            took = time.monotonic() - started
+            self.writer.mark_synced(time_us)
+            self._longest_sync = max(self._longest_sync, took)
+            if took >= SLOW_SYNC_SECONDS:
+                log.warning("Sync to disk took %.1fs", took)
 
             elapsed = time.monotonic() - last_status
             if elapsed >= STATUS_INTERVAL_SECONDS:
-                self._log_status(elapsed, synced_time_us)
+                self._log_status(elapsed)
                 last_status = time.monotonic()
 
-    def _log_status(self, elapsed: float, synced_time_us: int | None) -> None:
+    async def _watch_loop(self) -> None:
+        """Measure how late the event loop wakes up: that's how long something blocked it."""
+        while True:
+            started = time.monotonic()
+            await asyncio.sleep(LOOP_CHECK_SECONDS)
+            pause = time.monotonic() - started - LOOP_CHECK_SECONDS
+            self._longest_pause = max(self._longest_pause, pause)
+            if pause >= LOOP_PAUSE_WARNING_SECONDS:
+                log.warning("Event loop was blocked for %.1fs", pause)
+
+    def _log_status(self, elapsed: float) -> None:
+        synced_time_us = self.writer.last_synced_time_us
         lag = "n/a" if synced_time_us is None else f"{time.time() - synced_time_us / 1e6:.1f}s"
         log.info(
-            "%s events in %.0fs (%.1f/s), %s behind live%s",
+            "%s events in %.0fs (%.1f/s), %s behind live, longest sync %.2fs, longest pause %.2fs%s",
             f"{self._events_since_status:,}",
             elapsed,
             self._events_since_status / elapsed,
             lag,
+            self._longest_sync,
+            self._longest_pause,
             f", {self._skipped_since_status} unreadable skipped" if self._skipped_since_status else "",
         )
         self._events_since_status = 0
         self._skipped_since_status = 0
+        self._longest_sync = 0.0
+        self._longest_pause = 0.0
 
 
 async def _run(data_dir: Path, url: str) -> None:
