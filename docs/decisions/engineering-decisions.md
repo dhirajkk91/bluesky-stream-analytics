@@ -274,3 +274,5 @@ Three changes to the event store's columns, measured from Iceberg's own per-colu
 **Simpler too:** D-027's duplicated file handle, which let the main loop keep writing during a sync, isn't needed any more, because the thread that syncs is the only one that writes.
 
 **Test:** slowed-down syncs and slowed-down writes both leave the main loop pausing under 0.2 seconds, with the queue absorbing the delay and every event written once. With writing put back on the main loop, the slow-write test fails. The kill test, run again on the new code, still loses nothing.
+
+**Result:** the same heavy job again, on the server. Syncs still took up to 45 seconds, but the main loop never paused more than 0.05 seconds (against 5.2 before), the collector stayed 0.1 seconds behind live, and the queue peaked at 20,753 events during the longest sync. No drops ([details](../validation/testing.md#the-heavy-job-test)).

@@ -245,17 +245,20 @@ That's about 14 drops an hour during a long, heavy job against about one every 9
 
 The same load as a backfill, on purpose: `fetch-raw` downloaded all of 25 October from S3, about 5.5 GB, and `process` loaded it in batches of 3 files into a throwaway local DuckDB file, so the real event store wasn't touched. The download took under 2 minutes and the load 9.
 
-The load added 32,640,195 events, exactly the number of distinct events Athena's `store-vs-raw` check counted for that day, so the job and the independent check agree to the event.
+The test was run twice, once with the sync on its own thread ([D-027](../decisions/engineering-decisions.md#d-027-sync-to-disk-on-its-own-thread)) and again after reading and writing were split ([D-028](../decisions/engineering-decisions.md#d-028-read-and-write-on-separate-threads)). Both times the load added 32,640,195 events, exactly the number of distinct events Athena's `store-vs-raw` check counted for that day, so the job and the independent check agree to the event.
 
-The collector, with the sync on its own thread ([D-027](../decisions/engineering-decisions.md#d-027-sync-to-disk-on-its-own-thread)):
+The collector during each run:
 
-| | Normal | During the heavy job |
-|---|---|---|
-| Longest sync | 0.01 to 0.04 s | 40 s, and 27 syncs over 1 s |
-| Main loop blocked 2 s or more | never | 13 times, 2.2 to 5.2 s each |
-| Events a second | about 480 | 470 to 525 |
-| Connection drops | | 0, where the old rate would predict 2 or 3 |
+| | Normal | Sync on its own thread | Reading and writing split |
+|---|---|---|---|
+| Longest sync | 0.01 to 0.04 s | 40 s, and 27 syncs over 1 s | 45 s, and 24 syncs over 1 s |
+| Longest main-loop pause | 0.00 s | 5.2 s, and 13 pauses of 2 s or more | **0.05 s** |
+| Longest the queue got | | | 20,753 events |
+| Behind live | 0.1 s | | 0.1 s throughout |
+| Events a second | about 480 | 470 to 525 | 460 to 550 |
+| Connection drops | | 0 | 0 |
 
 - **The explanation holds.** A sync that normally takes a few hundredths of a second took up to 40 seconds while the disk was busy. Before D-027 each of those ran on the main loop, so nothing read from the connection for that long.
 - **The sync thread helped.** The collector kept reading at its normal rate throughout and the connection stayed up.
 - **It wasn't the whole story.** The main loop still stopped for up to 5 seconds at a time, because the writes themselves were still on it, and when the disk is overloaded Linux makes writes wait too. That's why reading and writing were then split onto separate threads ([D-028](../decisions/engineering-decisions.md#d-028-read-and-write-on-separate-threads)).
+- **With them split, the disk no longer reaches the connection.** The disk was just as slow, with one sync taking 45 seconds, but the longest the main loop paused in any minute was 0.05 seconds, and the newest event received was never more than 0.1 seconds behind live. The delay showed up where it should: the queue grew to 20,753 events during the 45-second sync, about what 45 seconds of events adds up to, and emptied again within a minute. Back to normal after the job, the queue stays at around 100 to 300 events.
