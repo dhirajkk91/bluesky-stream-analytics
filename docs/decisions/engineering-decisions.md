@@ -145,7 +145,7 @@ Reads and writes are split in the CQRS sense: the store is shaped for appending,
 
 The job that loads the event store is PySpark running on the Oracle server in local mode (one machine, every core), started by a systemd timer.
 
-**Honestly:** this data doesn't need Spark. An hour is about 1.5 million events, roughly 1 GB of JSON, and DuckDB or Polars on one machine would handle it, probably faster, since Spark spends several seconds just starting. I picked Spark because the compute is free on the server, it writes Iceberg tables with `MERGE` well, and the same job would run on a cluster (EMR, Glue) unchanged if the volume grew 100 times.
+**Honestly:** this data doesn't need Spark. An hour is about 1.5 million events, roughly 1 GB of JSON, and DuckDB or Polars on one machine would handle it. I picked Spark because the compute is free on the server, it writes Iceberg tables with `MERGE` well, and the same job would run on a cluster (EMR, Glue) unchanged if the volume grew 100 times.
 
 **Alternatives:**
 
@@ -153,6 +153,16 @@ The job that loads the event store is PySpark running on the Oracle server in lo
 - AWS Glue jobs or EMR Serverless. Managed Spark, but around $20 a month for an hourly job, twice the budget.
 
 **Limits:** the job shares 2 cores and 12 GB with the collector. It runs at a lower CPU priority with a 6 GB memory cap, so the collector always wins.
+
+**Measured afterwards:** the same transform on the same real hour, with both engines held to the server's 2 cores ([details](../validation/testing.md#spark-against-duckdb)):
+
+| | DuckDB | Spark |
+|---|---|---|
+| Time | 11 s | 82 s |
+| CPU time | 20 s | 135 s |
+| Peak memory | 1.6 GB | 2.6 GB |
+
+DuckDB is about 7 times faster on this data, needs less memory, and produced exactly the same events. At this volume, Spark's ability to spread work across a cluster buys nothing.
 
 ## D-020: Iceberg tables in the Glue catalog
 

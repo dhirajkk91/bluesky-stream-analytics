@@ -151,3 +151,19 @@ The first hourly runs had repeats too, and again each one lines up with the coll
 | 2,253 | One dropped connection in hour 17 |
 
 **Open question:** these drops were abrupt (the connection ended without a close frame). Five of the six on this day happened while the Spark job was running: four during the 25-minute backfill and one during the heaviest hourly run. The eight lighter hourly runs after that had none, and the two drops on the first day happened with no Spark job at all. That's not enough to call it a cause. Reconnects per hour, and whether the job was running at the time, will be tracked once monitoring exists.
+
+## Spark against DuckDB
+
+`benchmarks/compare_engines.py` runs the event store's transform with both engines on the same raw files: read the zstd JSON lines, parse the same fields, drop repeats on the same event key, and write Parquet with zstd. Neither writes to Iceberg, so this compares the engines, not the catalog. Each engine runs in its own process, held to 2 threads, and the script checks that both outputs hold the same events (row count, sum of timestamps and number of accounts).
+
+On the server, with one real hour (1,691,007 events, 239 MB compressed), two runs each:
+
+| | DuckDB | Spark |
+|---|---|---|
+| Time | 11.2 s, 10.5 s | 82.7 s, 81.7 s |
+| CPU time | 20 s | 134 to 136 s |
+| Peak memory | 1.5 to 1.6 GB | 2.5 to 2.6 GB |
+| Output | 130 MB | 151 MB |
+| Events | 1,691,007 | 1,691,007 |
+
+Both outputs matched exactly, and the event count is the same one the hourly job added for that hour. What this means for the choice of engine is in [D-019](../decisions/engineering-decisions.md#d-019-spark-in-local-mode-on-the-server).

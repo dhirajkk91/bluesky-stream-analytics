@@ -21,6 +21,9 @@ process = "bluesky_stream_analytics.process:main"
 fetch-raw = "bluesky_stream_analytics.fetch_raw:main"
 
 [dependency-groups]
+bench = [
+    "duckdb>=2.0.0",
+]
 dev = [
     "pytest>=9.1.1",
 ]
