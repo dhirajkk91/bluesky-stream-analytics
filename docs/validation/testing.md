@@ -107,3 +107,47 @@ The collector's log at the top of the hour on the server, before and after the c
 | Previous hour's file finished | before the next one started | 01:00:09, after the next one started |
 
 Compressing the hour still takes about 9 seconds, but it now happens next to the stream instead of in front of it. The status line covering the change read 25,937 events in 61 s, 0.1 s behind live, in line with the minutes around it.
+
+## The event store on real data
+
+The first run of the event store job loaded everything collected so far: the raw files for 21 hours, downloaded back from S3 with `fetch-raw`.
+
+| | |
+|---|---|
+| Files | 23, in 8 commits of up to 3 files |
+| Lines read | 26,294,783 |
+| Unreadable | 0 |
+| Repeats removed | 13,102 |
+| Events stored | 26,281,681 |
+| Time | 24.5 minutes on the server's 2 ARM cores, about 18,000 events a second |
+
+**Cross-checks:**
+
+- **Against the SQL checks.** For the hours the Athena duplicates check had already covered, the job's numbers match it exactly: 2,741,555 lines and 2,299 repeats for hours 18 and 19, and 4,567,210 lines and 4,271 repeats for hours 20 to 22.
+- **Against Athena.** `SELECT count(*) FROM bluesky_store.events` returns 26,281,681, the same number the job reported adding.
+
+Every repeat traces back to something in the collector's log:
+
+| Repeats | Cause |
+|---|---|
+| 2,299 | The reboot test |
+| 4,271 | Two dropped connections, 50 seconds apart |
+| 4,204 | The restart that deployed the compression change. Its two files for hour 00 overlap by the rewind plus up to 5 seconds since the last cursor save |
+| 2,328 | Jetstream closing the connection at 14:56:57 |
+
+After the backfill, the timer took over. Each run picks up the hour the uploader handed over 10 minutes earlier:
+
+| | |
+|---|---|
+| Events per hour | 1.63 to 1.89 million |
+| Time per run | 91 to 106 seconds, Spark startup included |
+| Files left waiting in `uploaded/` | none |
+
+The first hourly runs had repeats too, and again each one lines up with the collector's log:
+
+| Repeats | Cause |
+|---|---|
+| 9,492 | Four dropped connections in hours 15 and 16, about 2,370 each |
+| 2,253 | One dropped connection in hour 17 |
+
+**Open question:** these drops were abrupt (the connection ended without a close frame). Five of the six on this day happened while the Spark job was running: four during the 25-minute backfill and one during the heaviest hourly run. The eight lighter hourly runs after that had none, and the two drops on the first day happened with no Spark job at all. That's not enough to call it a cause. Reconnects per hour, and whether the job was running at the time, will be tracked once monitoring exists.
