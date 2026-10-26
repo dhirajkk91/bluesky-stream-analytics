@@ -253,3 +253,24 @@ Three changes to the event store's columns, measured from Iceberg's own per-colu
 **Test:** a sync slowed to 0.3 seconds still lets events be written meanwhile, with the main loop never pausing more than 0.2 seconds. With the sync moved back onto the main loop, the same test fails.
 
 **Limits:** the main loop still writes to the file itself. If the operating system ever holds up those writes, which it can do when too much data is waiting to reach the disk, the loop could still stall. The pause measurement would show that.
+
+**Result:** it did. During a deliberate heavy job, syncs took up to 40 seconds and the connection stayed up, but the main loop was still blocked for 2 to 5 seconds at a time by the writes themselves. That led to [D-028](#d-028-read-and-write-on-separate-threads).
+
+## D-028: Read and write on separate threads
+
+**Found:** with only the sync moved off the main loop ([D-027](#d-027-sync-to-disk-on-its-own-thread)), a deliberate heavy job on the server still blocked the main loop 13 times in 11 minutes, for 2 to 5 seconds each ([details](../validation/testing.md#the-heavy-job-test)). The rest of the disk work was still on it: every write, and the hourly rollover's sync. When a big download or a DuckDB spill fills the disk's queue, Linux makes every program that writes wait, including the collector.
+
+**Fix:** split the collector in two, joined by a queue.
+
+- **The asyncio loop only reads.** It takes each message off the connection, reads `time_us`, and puts both on the queue.
+- **One writer thread does all the disk work.** It owns the hourly files: writing, rolling over, syncing every 5 seconds and saving the cursor. Only it touches the writer, so no locking is needed.
+
+**What stays the same:** the cursor only moves after an `fsync`, so a crash still replays from the last sync and never skips anything. Shutdown writes everything still queued before saving the final cursor. A failed write or compression stops the collector with its cursor saved, as before.
+
+**The queue's limit:** 200,000 events, about 7 minutes at the usual rate and about 150 MB. A 40-second stall needs about 20,000. If the disk is stuck long enough to fill it, the loop stops reading until there's room rather than growing without limit. That's safe because of the cursor: at worst Jetstream drops the connection, and the reconnect replays from the newest event received.
+
+**Resuming:** a reconnect resumes from the newest event received, not the newest written, because queued events will still be written.
+
+**Simpler too:** D-027's duplicated file handle, which let the main loop keep writing during a sync, isn't needed any more, because the thread that syncs is the only one that writes.
+
+**Test:** slowed-down syncs and slowed-down writes both leave the main loop pausing under 0.2 seconds, with the queue absorbing the delay and every event written once. With writing put back on the main loop, the slow-write test fails. The kill test, run again on the new code, still loses nothing.

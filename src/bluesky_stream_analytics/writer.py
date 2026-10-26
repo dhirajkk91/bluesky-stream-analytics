@@ -39,7 +39,11 @@ def partition_dir(root: Path, hour: datetime) -> Path:
 
 
 class HourlyFileWriter:
-    """Appends events to the current hour's file and rolls over when a later hour starts."""
+    """
+    Appends events to the current hour's file and rolls over when a later hour starts.
+
+    Not thread-safe: the collector uses it from its writer thread only.
+    """
 
     def __init__(self, root: Path) -> None:
         self.root = root
@@ -71,25 +75,6 @@ class HourlyFileWriter:
             os.fsync(self._file.fileno())
         self._last_synced_time_us = self._last_written_time_us
         return self._last_synced_time_us
-
-    def start_sync(self) -> tuple[int | None, int | None]:
-        """
-        Hand the events written so far to the OS, so they can be made durable on another thread.
-
-        Returns a duplicate of the current file's descriptor (None if no file is
-        open) for the caller to fsync and then close, and the newest time_us that
-        fsync will cover. Writing can carry on while it runs; once it has finished,
-        pass the time_us to mark_synced.
-        """
-        if self._file is None:
-            return None, self._last_written_time_us
-        self._file.flush()
-        return os.dup(self._file.fileno()), self._last_written_time_us
-
-    def mark_synced(self, time_us: int | None) -> None:
-        """Record that every event up to time_us is on disk. Never moves backwards."""
-        if time_us is not None and (self._last_synced_time_us is None or time_us > self._last_synced_time_us):
-            self._last_synced_time_us = time_us
 
     def check(self) -> None:
         """Raise the error of any background compression that has failed."""
