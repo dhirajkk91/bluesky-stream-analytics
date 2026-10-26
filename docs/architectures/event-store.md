@@ -93,4 +93,18 @@ At about 1.5 million events (about 1 GB of JSON) an hour, one machine is plenty,
 - Reading the input costs nothing, because it reads the local copy rather than downloading from S3.
 - Writing to S3 is free.
 - The merge reads at most the hours a batch touches.
-- Storage is the only real cost, measured once the table has been running a while.
+- Storage is the only real cost.
+
+Measured on the first 26.3 million events, the table is 2.03 GB, about 77 bytes an event, or roughly 2.8 GB a day. That's 55% of the compressed raw files for the same hours. Iceberg records every column's size per file, so the breakdown comes straight from its metadata:
+
+| Column | Share of the table |
+|---|---|
+| `cid` | 42% |
+| `subject_uri` | 16% |
+| `subject_did` | 9% |
+| `rkey` | 8% |
+| `rev` | 7% |
+| `event_time` and `time_us` | 6% each |
+| Everything else | 6% |
+
+Random-looking identifiers barely compress, and `cid`, a 59-character content hash that no metric uses, is the biggest by far.
