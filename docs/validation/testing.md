@@ -16,6 +16,7 @@
 | Uploader request shape | Against botocore's own S3 model, so a wrong parameter name or a mishandled `412` fails the test |
 | Event parsing | Real-shaped likes, reposts, follows, posts, deletes, identity and account events become the right columns, with the parsing SQL the job runs. A like's target splits into account, record type and key, post text never comes through, unreadable lines are dropped, `event_time` is UTC to the microsecond, and only true repeats are removed |
 | Event store load, end to end | The job's own SQL against a table in a local DuckDB database: loads files and deletes them, loading the same events again adds nothing, a restart's rewind into the next hour's file is matched against the earlier hour, batches load oldest first. The Glue and Iceberg side is covered by the check below and by the real loads |
+| Projections | Creates become current records with the creation time decoded from the key. A delete hides its record and keeps only the key, `rev` and time. A delete folded before its create still wins, folding the same commit three times changes nothing, an edit replaces the post in either order, a key reused after a delete is current again, and a delete of a record never seen is only a marker. Other record types and account events aren't projected. Only commits after the last run are folded, and each run is logged. The accounts view picks the latest handle and status |
 | Backfill download | Only finished files under the requested day or hour, across pages of results, and nothing already waiting locally is downloaded again |
 
 ## Kill test
@@ -183,6 +184,22 @@ Before the job moved to DuckDB, a throwaway script checked every operation it an
 | `MERGE` that updates one row and deletes another | 2 changed |
 | Read back in DuckDB | the expected 2 rows |
 | Read back in Athena | the same 2 rows, so Athena applies DuckDB's delete files |
+
+## DuckDB and the projections
+
+A second throwaway script checked what the projections would need, against two test tables in Glue. For each query it counted the data files DuckDB actually downloaded, from its HTTP log:
+
+| Step | Result |
+|---|---|
+| Add a column to an existing table | Works, and the older rows read as empty |
+| Filter on the new column | 4 of 5 files read: files written before the column existed have no statistics for it, so they can't be skipped |
+| List the table's files with the commit that added each | `iceberg_metadata` gives every file's sequence number |
+| Filter on record type and month, in a table partitioned by both | 1 of 6 files read |
+| `MERGE` that only applies a newer `rev`, including turning a row into a deleted marker | Correct, in 1 commit |
+| How `MERGE` finds the rows it changes | Reads every file whose keys fall in the batch's key range: 4 of 6 |
+| Delete then insert in one transaction | 2 commits, so not atomic |
+
+The last three are why the projections append instead of updating rows ([D-029](../decisions/engineering-decisions.md#d-029-projections-are-appended-to-not-updated-in-place)), and the first three why they find new commits by sequence number ([D-030](../decisions/engineering-decisions.md#d-030-new-store-commits-are-found-by-their-iceberg-sequence-number)).
 
 ## The event store on DuckDB
 

@@ -2,7 +2,7 @@
 
 ## Purpose
 
-Athena runs SQL directly on the raw hourly files in S3, with nothing loaded or copied first. That's for checking the collector's output: how many events arrived, whether any minute is missing, and how many duplicates the resume rewinds created. The [event store](event-store.md) table `bluesky_store.events` is queried through the same workgroup. It's typed and columnar, so it's the one to use for anything else.
+Athena runs SQL directly on the raw hourly files in S3, with nothing loaded or copied first. That's for checking the collector's output: how many events arrived, whether any minute is missing, and how many duplicates the resume rewinds created. The [event store](event-store.md) table `bluesky_store.events` and the [projections](projections.md)' views are queried through the same workgroup. They're typed and columnar, so they're the ones to use for anything else.
 
 ## Goals and non-goals
 
@@ -52,6 +52,9 @@ The SQL lives in `sql/` and is loaded into Athena as saved queries by Terraform.
 | `duplicates` | Rows stored versus distinct events, per hour |
 | `event-mix` | Share of events by kind, record type and operation |
 | `store-vs-raw` | For yesterday, distinct raw events against rows in the event store, per hour. Every hour should match |
+| `create-current-records-view` | Creates or updates the `current_records` view over the projections |
+| `create-accounts-view` | Creates or updates the `accounts` view over the event store |
+| `projections-vs-store` | Records that exist now, from the projections against a recount from the event store, per record type. Every type should match |
 
 An event is identified by its account, record type, record key, revision and operation for commits, and by its sequence number for identity and account events. `time_us` is not unique, so it isn't part of the key.
 

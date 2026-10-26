@@ -7,6 +7,7 @@ The pipeline turns Bluesky's public Jetstream feed into an event log collected n
 - [Collector](collector.md): connecting, writing hourly files, resuming after a crash
 - [Uploader](uploader.md): moving finished files to S3
 - [Event store](event-store.md): the hourly DuckDB job that keeps every event exactly once
+- [Projections](projections.md): current posts, likes, reposts, follows and blocks, with deletes applied
 - [Query layer](query-layer.md): SQL on the raw files and the event store with Athena
 - [Infrastructure](infrastructure.md): the Oracle server and the AWS resources
 
@@ -33,7 +34,7 @@ flowchart LR
 |---|---|---|---|
 | Raw event log | Every event exactly as Jetstream sent it, duplicates included | Append only, expires after 14 days | Built |
 | Event store | Each event once, typed, no record content | Append only, never updated | Built |
-| Projections | What exists right now, with deletes applied | Rebuilt or updated by folding events in order | Next |
+| Projections | What exists right now, with deletes applied | New versions and delete markers appended each hour, the latest picked by views | Built |
 | Marts | Kimball star schema: facts like engagement, dimensions like accounts with full history (SCD type 2) | Built from the store and projections | Later |
 
 Writes and reads are kept apart in the CQRS sense. The event store is shaped for appending what happened. The projections and marts are read models, each shaped for the questions asked of it, and any of them can be thrown away and rebuilt from the store.
@@ -52,12 +53,12 @@ flowchart LR
         C["collect<br/>systemd service"]
         F["/var/lib/bluesky<br/>hourly .jsonl.zst files<br/>+ cursor.json"]
         U["upload<br/>systemd timer, every 10 min"]
-        P["process<br/>DuckDB, hourly at :20"]
+        P["process, then project<br/>DuckDB, hourly at :20"]
     end
 
     subgraph AWS["AWS, us-east-1"]
         S3[("S3<br/>raw/events/date=…/hour=…<br/>kept 14 days")]
-        WH[("S3 warehouse/<br/>Iceberg: bluesky_store.events")]
+        WH[("S3 warehouse/<br/>Iceberg: events,<br/>records, record_deletes")]
         A["Athena"]
     end
 
@@ -66,7 +67,7 @@ flowchart LR
     U -->|"finished files only"| F
     U -->|"checksummed,<br/>never overwrites"| S3
     U -->|"hands over the local copy"| P
-    P -->|"new events only"| WH
+    P -->|"new events, then<br/>new versions and deletes"| WH
     A -->|"reads"| S3
     A -->|"reads"| WH
 ```
@@ -75,7 +76,8 @@ flowchart LR
 2. **Finish the hour.** When an event from the next hour arrives, the current file is compressed with zstd and becomes read-only from then on.
 3. **Upload.** Every 10 minutes `upload` sends each finished file to S3 under the same path, with a checksum S3 verifies. Only after S3 confirms does it move the local copy to `uploaded/` for processing.
 4. **Process.** Every hour `process` loads the waiting files with DuckDB, removes duplicates, and appends the events the event store doesn't have yet. Then it deletes the local copies.
-5. **Query.** Athena reads the raw files in place for checks, and the event store for everything else.
+5. **Project.** Right after, `project` reads the store commits added since its last run and appends new record versions and delete markers to the projections.
+6. **Query.** Athena reads the raw files in place for checks, and the event store and the projections' views for everything else.
 
 There is also `watch`, which prints a live summary of the stream and saves nothing. It's for checking the feed from any machine.
 
@@ -115,11 +117,12 @@ src/bluesky_stream_analytics/
     upload.py        copies finished files to S3, then hands them to the processor
     process.py       hourly job: appends handed-over files to the event store
     event_store.py   the SQL that parses, de-duplicates and appends events
+    projections.py   hourly job: folds new store commits into the projections
     fetch_raw.py     downloads raw files from S3 for backfills
     fs.py            helper for durable renames
 tests/               unit and end-to-end tests
 infra/aws/           Terraform for the bucket, IAM users, the budget, Glue and Athena
-sql/                 the events view and the check queries
+sql/                 the views and the check queries
 deploy/              systemd units and env file examples
 benchmarks/          the Spark version of the transform, and the Spark against DuckDB comparison
 ```

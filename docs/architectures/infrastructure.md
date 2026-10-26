@@ -72,7 +72,7 @@ flowchart LR
 | `bluesky-upload.timer` | Starts `bluesky-upload.service` at :00, :10, :20 … every hour |
 | `bluesky-upload.service` | Runs `upload` once. systemd reads the key file as root and passes the values in as environment variables |
 | `bluesky-process.timer` | Starts `bluesky-process.service` at 20 past every hour |
-| `bluesky-process.service` | Runs the event store job once. DuckDB is held to 2 threads and 3 GB, the service runs at a lower CPU priority than the collector, and systemd caps it at 4 GB of memory |
+| `bluesky-process.service` | Runs the event store job once, then the projections job. DuckDB is held to 2 threads and 3 GB, the service runs at a lower CPU priority than the collector, and systemd caps it at 4 GB of memory |
 
 All three run as an unprivileged `bluesky` user. systemd keeps the rest of the filesystem read-only to them, so the only place they can write is `/var/lib/bluesky`. Logs go to the systemd journal.
 

@@ -276,3 +276,36 @@ Three changes to the event store's columns, measured from Iceberg's own per-colu
 **Test:** slowed-down syncs and slowed-down writes both leave the main loop pausing under 0.2 seconds, with the queue absorbing the delay and every event written once. With writing put back on the main loop, the slow-write test fails. The kill test, run again on the new code, still loses nothing.
 
 **Result:** the same heavy job again, on the server. Syncs still took up to 45 seconds, but the main loop never paused more than 0.05 seconds (against 5.2 before), the collector stayed 0.1 seconds behind live, and the queue peaked at 20,753 events during the longest sync. No drops ([details](../validation/testing.md#the-heavy-job-test)).
+
+## D-029: Projections are appended to, not updated in place
+
+**The obvious design:** keep one row per record and `MERGE` each hour's changes into it, updating edits and removing deletes.
+
+**What the probe found** ([details](../validation/testing.md#duckdb-and-the-projections)): `MERGE` is DuckDB's only atomic way to change rows (a delete then an insert in one transaction made two commits), and to find the rows it changes it reads every file whose keys fall between the batch's smallest and largest key. Every hour has a few deletes of old records, unlikes of things liked weeks ago, which stretch that range across nearly the whole table. So each hourly `MERGE` would read most of the projection from S3, and the server is outside AWS: past the free 100 GB a month, every GB read costs about $0.09. By the second month that's tens of GB an hour.
+
+**Decision:** the hourly run only appends: new versions of records to `records`, and a marker per delete to `record_deletes`. Which version is current is decided by a view ([D-031](#d-031-the-highest-rev-wins-and-deletes-leave-a-marker)). Nothing already written is read, so the hourly cost doesn't grow with the tables.
+
+**Cost of it:** queries do the work of picking the latest version and skipping deleted records, and deleted rows stay in the files until something rewrites them. That's a daily compaction in Athena, which runs inside AWS and so reads for free apart from Athena's per-byte price. It's the next step, and it also sets how long a deleted record can physically remain.
+
+**Alternatives:** Iceberg equality deletes, which remove rows by key without reading them first, are exactly this idea built into the format, but DuckDB only writes positional deletes. Running the hourly fold in Athena would avoid the transfer cost but not the growing scan.
+
+## D-030: New store commits are found by their Iceberg sequence number
+
+`project` has to read only what the event store gained since its last run.
+
+**Decision:** Iceberg gives every commit a sequence number and records, for every data file, the one it was added in. DuckDB's `iceberg_metadata` lists them. `project` folds the files above the sequence number its last run logged, one commit at a time, and reads them straight from S3. The store is append-only, so its files are its contents; a delete file would break that, so it stops the run.
+
+**Rejected:** a `loaded_at` column on the store. The probe showed adding the column works, but the files written before it have no statistics for it, so a filter on it can never skip them: every run would open every old file. A window on `event_time` would miss backfilled hours, whose events are old but new to the store. Folding the batch `process` just loaded, from memory, would need no reading at all, but the two jobs commit separately, so a crash between them would lose that batch for the projections for good.
+
+## D-031: The highest rev wins, and deletes leave a marker
+
+**Rule:** a record's current version is its highest `rev` among creates and edits, and it's deleted if a delete has a higher `rev`. `rev` is the account's repo revision, which only goes up, so it gives the true order of a record's changes however late or repeated the events arrive. The highest of a set doesn't depend on order, so folding any events any number of times in any order gives the same views. Reruns and backfills need nothing special.
+
+**Why markers:** if a delete removed the row, a create arriving after it, from a backfill or a replay, would bring the record back. A marker outranks it. It also covers deletes of records created before collection began: they're markers with nothing to hide, and the check query counts them.
+
+**Privacy:** a marker keeps only the key, `rev` and time. What a deleted like pointed at isn't copied into it. The record's earlier row is hidden by the view at once and physically removed by compaction.
+
+## D-032: Accounts are a view over the event store
+
+An account's current handle and status come from identity and account events, about 0.1% of the store. A view takes the latest of each by sequence number straight from the store, so there's no table to keep in sync. If it gets slow as the store grows, it becomes a projection like the others. Account history (SCD type 2) will come from the same events in the marts.
+
