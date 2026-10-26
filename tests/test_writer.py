@@ -1,5 +1,4 @@
 import json
-import os
 from datetime import UTC, datetime
 
 import pytest
@@ -215,29 +214,3 @@ def test_check_raises_once_a_failed_compression_has_finished(tmp_path, monkeypat
 
     with pytest.raises(OSError, match="disk full"):
         writer.check()
-
-
-def test_start_sync_with_no_file_open(tmp_path):
-    assert HourlyFileWriter(tmp_path).start_sync() == (None, None)
-
-
-def test_start_sync_descriptor_outlives_a_rollover(tmp_path):
-    writer = HourlyFileWriter(tmp_path)
-    writer.write(event(BEFORE_BOUNDARY_US), BEFORE_BOUNDARY_US)
-
-    fd, time_us = writer.start_sync()
-    writer.write(event(AFTER_BOUNDARY_US), AFTER_BOUNDARY_US)  # closes the file the descriptor points at
-    os.fsync(fd)
-    os.close(fd)
-    writer.mark_synced(time_us)
-
-    assert time_us == BEFORE_BOUNDARY_US
-    writer.close()
-
-
-def test_mark_synced_never_moves_backwards(tmp_path):
-    writer = HourlyFileWriter(tmp_path)
-    writer.mark_synced(200)
-    writer.mark_synced(100)
-    writer.mark_synced(None)
-    assert writer.last_synced_time_us == 200

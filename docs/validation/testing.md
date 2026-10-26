@@ -11,7 +11,7 @@
 | Crash recovery | A half-written last line is cut off and every complete line kept, a crash after compression, leftover temp and empty files |
 | Collector, end to end | Against a fake Jetstream on localhost that honours `?cursor=`: collects everything, survives a dropped connection, restarts from the saved cursor, resumes from recovered data newer than the cursor |
 | Uploader | Against a fake S3: exact bytes stored, an existing object is never overwritten, the local copy moves to `uploaded/` only after S3 has it, one failure doesn't stop the rest |
-| Slow disk sync | A sync slowed to 0.3 seconds still lets events be read and written meanwhile, the main loop never pauses more than 0.2 seconds, a slow sync is logged, and a stop that arrives mid-sync waits for it before saving the cursor. With the sync put back on the main loop, the first check fails |
+| Slow disk | Syncs slowed to 0.3 seconds, or every 200th write slowed to 0.3 seconds: the main loop never pauses more than 0.2 seconds, events wait in the queue meanwhile, and every event is written exactly once with the cursor at the last one. With writing put back on the main loop, the slow-write check fails. Also: a slow sync is logged, a full queue holds reading back without losing anything, a stop writes everything still queued before saving the cursor, and a failed write stops the collector with the cursor of the last sync |
 | Background compression | A rollover returns without waiting for compression, close waits for it, and a failed compression is raised and leaves the `.open` file for recovery. End to end, a failed compression stops the collector with its cursor saved |
 | Uploader request shape | Against botocore's own S3 model, so a wrong parameter name or a mishandled `412` fails the test |
 | Event parsing | Real-shaped likes, reposts, follows, posts, deletes, identity and account events become the right columns, with the parsing SQL the job runs. A like's target splits into account, record type and key, post text never comes through, unreadable lines are dropped, `event_time` is UTC to the microsecond, and only true repeats are removed |
@@ -32,6 +32,8 @@ The real `collect` command ran against a fake server sending 20,000 events, and 
 | Unique events saved | 20,000 |
 | Missing | 0 |
 | Duplicate lines from the rewinds | 6,862 |
+
+The test was run again when reading and writing moved to separate threads ([D-028](../decisions/engineering-decisions.md#d-028-read-and-write-on-separate-threads)), with the same result: all 20,000 events saved, none missing.
 
 The first run of this test found a gap: with no cursor saved yet, the restart began from live and lost everything after the last event in the file. Recovery now reports the newest event it rescued and the collector resumes from there ([D-006](../decisions/engineering-decisions.md#d-006-resume-from-the-newer-of-the-cursor-and-the-recovered-data)).
 
@@ -237,4 +239,23 @@ The collector's log shows a pattern in when Jetstream connections drop. Most dro
 | DuckDB backfill, including downloading the raw files | 27 minutes | 8 |
 | Everything else, from the first event to the afternoon of the third day | about 43 hours | 5 |
 
-That's about 14 drops an hour during a long, heavy job against about one every 9 hours the rest of the time, including during the normal 10 to 16 second hourly runs. One explanation fits: the collector syncs its file to disk every 5 seconds on its main loop, and while the disk is busy with a job's reads and spills, that sync can stall. While it's stalled, nothing reads from the connection, and Jetstream may drop a client that falls behind. That's not proven yet. The collector now syncs on a separate thread and logs both slow syncs and any pause of its main loop ([D-027](../decisions/engineering-decisions.md#d-027-sync-to-disk-on-its-own-thread)), so the next heavy job shows whether the disk stalls are real and whether the connection still drops. No events were lost either way: every drop was followed by a reconnect with the 5-second rewind.
+That's about 14 drops an hour during a long, heavy job against about one every 9 hours the rest of the time, including during the normal 10 to 16 second hourly runs. One explanation fits: the collector syncs its file to disk every 5 seconds on its main loop, and while the disk is busy with a job's reads and spills, that sync can stall. While it's stalled, nothing reads from the connection, and Jetstream may drop a client that falls behind. No events were lost either way: every drop was followed by a reconnect with the 5-second rewind. To check the explanation, the sync moved to its own thread and the collector started logging slow syncs and any pause of its main loop ([D-027](../decisions/engineering-decisions.md#d-027-sync-to-disk-on-its-own-thread)). Then a heavy job was run on purpose.
+
+## The heavy-job test
+
+The same load as a backfill, on purpose: `fetch-raw` downloaded all of 25 October from S3, about 5.5 GB, and `process` loaded it in batches of 3 files into a throwaway local DuckDB file, so the real event store wasn't touched. The download took under 2 minutes and the load 9.
+
+The load added 32,640,195 events, exactly the number of distinct events Athena's `store-vs-raw` check counted for that day, so the job and the independent check agree to the event.
+
+The collector, with the sync on its own thread ([D-027](../decisions/engineering-decisions.md#d-027-sync-to-disk-on-its-own-thread)):
+
+| | Normal | During the heavy job |
+|---|---|---|
+| Longest sync | 0.01 to 0.04 s | 40 s, and 27 syncs over 1 s |
+| Main loop blocked 2 s or more | never | 13 times, 2.2 to 5.2 s each |
+| Events a second | about 480 | 470 to 525 |
+| Connection drops | | 0, where the old rate would predict 2 or 3 |
+
+- **The explanation holds.** A sync that normally takes a few hundredths of a second took up to 40 seconds while the disk was busy. Before D-027 each of those ran on the main loop, so nothing read from the connection for that long.
+- **The sync thread helped.** The collector kept reading at its normal rate throughout and the connection stayed up.
+- **It wasn't the whole story.** The main loop still stopped for up to 5 seconds at a time, because the writes themselves were still on it, and when the disk is overloaded Linux makes writes wait too. That's why reading and writing were then split onto separate threads ([D-028](../decisions/engineering-decisions.md#d-028-read-and-write-on-separate-threads)).

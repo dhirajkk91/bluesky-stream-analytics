@@ -15,6 +15,7 @@ from websockets.asyncio.server import serve
 from bluesky_stream_analytics import collect
 from bluesky_stream_analytics.collect import Collector, backoff_delay, build_url
 from bluesky_stream_analytics.cursor import load_cursor
+from bluesky_stream_analytics.writer import HourlyFileWriter
 
 # 1,000 events, one every 10 ms, spanning the 13:00 -> 14:00 UTC boundary.
 START_US = int(datetime(2026, 10, 23, 13, 59, 55, tzinfo=UTC).timestamp() * 1_000_000)
@@ -193,75 +194,128 @@ def test_failed_compression_stops_the_collector_and_saves_the_cursor(tmp_path, m
 
 
 
-def slow_sync(monkeypatch, seconds: float, started: threading.Event | None = None):
-    """Make every disk sync take `seconds` longer; returns (written before, written after) per sync."""
-    real = collect.fsync_and_save
-    seen = []
+def slow_down(monkeypatch, method: str, seconds: float, every: int = 1):
+    """Make every `every`-th call of HourlyFileWriter.<method> take `seconds` longer, like a busy disk."""
+    real = getattr(HourlyFileWriter, method)
+    calls = {"n": 0}
+    started = threading.Event()
 
-    def slow(fd, cursor_path, time_us):
-        if started:
+    def slow(self, *args):
+        calls["n"] += 1
+        if calls["n"] % every == 0:
             started.set()
-        before = holder["collector"].writer.last_written_time_us
-        time.sleep(seconds)
-        seen.append((before, holder["collector"].writer.last_written_time_us))
-        real(fd, cursor_path, time_us)
+            time.sleep(seconds)
+        return real(self, *args)
 
-    holder = {}
-    monkeypatch.setattr(collect, "fsync_and_save", slow)
-    return holder, seen
+    monkeypatch.setattr(HourlyFileWriter, method, slow)
+    return started
+
+
+async def collect_all(tmp_path, pace: float = 0.002) -> Collector:
+    fake = FakeJetstream(pace=pace)
+    async with await serve_fake(fake) as server:
+        collector = Collector(tmp_path, url_of(server))
+        await run_until(collector, LAST_US)
+        return collector
+
+
+def assert_every_event_once_and_cursor_saved(tmp_path, collector):
+    assert collected_time_us(tmp_path) == [json.loads(raw)["time_us"] for raw in EVENTS]
+    assert load_cursor(tmp_path / "state" / "cursor.json") == collector.writer.last_synced_time_us == LAST_US
 
 
 def test_slow_disk_sync_does_not_stop_reading_the_connection(tmp_path, monkeypatch):
-    holder, seen = slow_sync(monkeypatch, 0.3)
+    slow_down(monkeypatch, "sync", 0.3)
 
-    async def scenario():
-        fake = FakeJetstream(pace=0.002)
-        async with await serve_fake(fake) as server:
-            collector = Collector(tmp_path, url_of(server))
-            holder["collector"] = collector
-            await run_until(collector, LAST_US)
-            return collector
+    collector = asyncio.run(collect_all(tmp_path))
 
-    collector = asyncio.run(scenario())
-
-    assert any(after > before for before, after in seen), "no events were written while a sync was running"
+    assert collector._longest_queue > 50, "events should pile up in the queue while a sync runs"
     assert collector._longest_pause < 0.2
-    assert set(collected_time_us(tmp_path)) == {json.loads(raw)["time_us"] for raw in EVENTS}
-    assert load_cursor(tmp_path / "state" / "cursor.json") == collector.writer.last_synced_time_us
+    assert_every_event_once_and_cursor_saved(tmp_path, collector)
+
+
+def test_slow_disk_writes_do_not_stop_reading_the_connection(tmp_path, monkeypatch):
+    slow_down(monkeypatch, "write", 0.3, every=200)
+
+    collector = asyncio.run(collect_all(tmp_path))
+
+    assert collector._longest_queue > 50
+    assert collector._longest_pause < 0.2
+    assert_every_event_once_and_cursor_saved(tmp_path, collector)
+
+
+def test_full_queue_pauses_reading_without_losing_events(tmp_path, monkeypatch, caplog):
+    monkeypatch.setattr(collect, "QUEUE_MAX_EVENTS", 20)
+    monkeypatch.setattr(collect, "QUEUE_FULL_RETRY_SECONDS", 0.01)
+    slow_down(monkeypatch, "write", 0.2, every=100)
+
+    with caplog.at_level(logging.WARNING):
+        collector = asyncio.run(collect_all(tmp_path, pace=0))
+
+    assert "Write queue is full" in caplog.text
+    assert collector._queue.maxsize == 20
+    assert_every_event_once_and_cursor_saved(tmp_path, collector)
 
 
 def test_slow_sync_is_logged(tmp_path, monkeypatch, caplog):
     monkeypatch.setattr(collect, "SLOW_SYNC_SECONDS", 0.1)
-    holder, _ = slow_sync(monkeypatch, 0.2)
-
-    async def scenario():
-        fake = FakeJetstream(pace=0.001)
-        async with await serve_fake(fake) as server:
-            holder["collector"] = Collector(tmp_path, url_of(server))
-            await run_until(holder["collector"], LAST_US)
+    slow_down(monkeypatch, "sync", 0.2)
 
     with caplog.at_level(logging.WARNING):
-        asyncio.run(scenario())
+        asyncio.run(collect_all(tmp_path, pace=0.001))
     assert "Sync to disk took" in caplog.text
 
 
-def test_stop_waits_for_a_sync_in_progress_before_saving_the_cursor(tmp_path, monkeypatch):
-    started = threading.Event()
-    holder, seen = slow_sync(monkeypatch, 0.5, started)
+def test_stop_writes_everything_queued_before_saving_the_cursor(tmp_path, monkeypatch):
+    # Hold the writer thread on its first event, so everything else is still queued at stop.
+    release = threading.Event()
+    real = HourlyFileWriter.write
+
+    def held(self, raw, time_us):
+        release.wait(timeout=5)
+        return real(self, raw, time_us)
+
+    monkeypatch.setattr(HourlyFileWriter, "write", held)
 
     async def scenario():
         fake = FakeJetstream()
         async with await serve_fake(fake) as server:
             collector = Collector(tmp_path, url_of(server))
-            holder["collector"] = collector
             task = asyncio.create_task(collector.run())
-            while not started.is_set():
+            while (collector.last_received_time_us or 0) < LAST_US:
+                assert not task.done(), task.exception()
                 await asyncio.sleep(0.01)
+            assert collector.writer.last_written_time_us is None
             collector.stop()
+            release.set()
             await asyncio.wait_for(task, timeout=5)
             return collector
 
     collector = asyncio.run(scenario())
 
-    assert len(seen) == 1  # the sync that was running when stop came in finished
-    assert load_cursor(tmp_path / "state" / "cursor.json") == collector.writer.last_synced_time_us
+    assert_every_event_once_and_cursor_saved(tmp_path, collector)
+
+
+def test_failed_write_stops_the_collector_and_saves_the_cursor(tmp_path, monkeypatch):
+    real = HourlyFileWriter.write
+
+    def failing(self, raw, time_us):
+        if time_us >= START_US + 600 * 10_000:
+            raise OSError("disk full")
+        return real(self, raw, time_us)
+
+    monkeypatch.setattr(HourlyFileWriter, "write", failing)
+
+    async def scenario():
+        fake = FakeJetstream(pace=0.001)
+        async with await serve_fake(fake) as server:
+            collector = Collector(tmp_path, url_of(server))
+            with pytest.raises(OSError, match="disk full"):
+                await asyncio.wait_for(collector.run(), timeout=5)
+            return collector
+
+    collector = asyncio.run(scenario())
+
+    saved = load_cursor(tmp_path / "state" / "cursor.json")
+    assert saved == collector.writer.last_synced_time_us == START_US + 599 * 10_000
+    assert collected_time_us(tmp_path) == [json.loads(raw)["time_us"] for raw in EVENTS[:600]]

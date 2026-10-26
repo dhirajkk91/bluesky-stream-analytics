@@ -71,7 +71,7 @@ flowchart LR
     A -->|"reads"| WH
 ```
 
-1. **Collect.** `collect` keeps one WebSocket open to a fixed Jetstream server and appends every event, exactly as received, to the current hour's file. Every 5 seconds it syncs the file to disk on a separate thread and then saves its position. After a crash it repairs any half-written file and resumes 5 seconds before its last saved position.
+1. **Collect.** `collect` keeps one WebSocket open to a fixed Jetstream server and appends every event, exactly as received, to the current hour's file. Reading and writing run on separate threads joined by a queue, so a busy disk never holds up the connection. Every 5 seconds the writer syncs the file to disk and then saves its position. After a crash it repairs any half-written file and resumes 5 seconds before its last saved position.
 2. **Finish the hour.** When an event from the next hour arrives, the current file is compressed with zstd and becomes read-only from then on.
 3. **Upload.** Every 10 minutes `upload` sends each finished file to S3 under the same path, with a checksum S3 verifies. Only after S3 confirms does it move the local copy to `uploaded/` for processing.
 4. **Process.** Every hour `process` loads the waiting files with DuckDB, removes duplicates, and appends the events the event store doesn't have yet. Then it deletes the local copies.
