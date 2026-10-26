@@ -11,6 +11,7 @@
 | Crash recovery | A half-written last line is cut off and every complete line kept, a crash after compression, leftover temp and empty files |
 | Collector, end to end | Against a fake Jetstream on localhost that honours `?cursor=`: collects everything, survives a dropped connection, restarts from the saved cursor, resumes from recovered data newer than the cursor |
 | Uploader | Against a fake S3: exact bytes stored, an existing object is never overwritten, the local copy moves to `uploaded/` only after S3 has it, one failure doesn't stop the rest |
+| Slow disk sync | A sync slowed to 0.3 seconds still lets events be read and written meanwhile, the main loop never pauses more than 0.2 seconds, a slow sync is logged, and a stop that arrives mid-sync waits for it before saving the cursor. With the sync put back on the main loop, the first check fails |
 | Background compression | A rollover returns without waiting for compression, close waits for it, and a failed compression is raised and leaves the `.open` file for recovery. End to end, a failed compression stops the collector with its cursor saved |
 | Uploader request shape | Against botocore's own S3 model, so a wrong parameter name or a mishandled `412` fails the test |
 | Event parsing | Real-shaped likes, reposts, follows, posts, deletes, identity and account events become the right columns, with the parsing SQL the job runs. A like's target splits into account, record type and key, post text never comes through, unreadable lines are dropped, `event_time` is UTC to the microsecond, and only true repeats are removed |
@@ -149,7 +150,7 @@ The first hourly runs had repeats too, and again each one lines up with the coll
 | 9,492 | Four dropped connections in hours 15 and 16, about 2,370 each |
 | 2,253 | One dropped connection in hour 17 |
 
-**Open question:** these drops were abrupt (the connection ended without a close frame). Five of the six on this day happened while the Spark job was running: four during the 25-minute backfill and one during the heaviest hourly run. The eight lighter hourly runs after that had none, and the two drops on the first day happened with no Spark job at all. That's not enough to call it a cause. Reconnects per hour, and whether the job was running at the time, will be tracked once monitoring exists.
+Five of the six drops that day, all but the one at 14:56, happened while the Spark job was running: four during the 25-minute backfill and one during the heaviest hourly run. More on that below.
 
 ## Spark against DuckDB
 
@@ -180,3 +181,60 @@ Before the job moved to DuckDB, a throwaway script checked every operation it an
 | `MERGE` that updates one row and deletes another | 2 changed |
 | Read back in DuckDB | the expected 2 rows |
 | Read back in Athena | the same 2 rows, so Athena applies DuckDB's delete files |
+
+## The event store on DuckDB
+
+The table was rebuilt with the leaner columns by the DuckDB job, from the 35 raw files S3 had at the time:
+
+| | |
+|---|---|
+| Files | 35, in 12 commits of up to 3 files |
+| Unreadable lines | 0 |
+| Repeats removed | 27,360 |
+| Events stored | 46,578,576 |
+| Time | 25 minutes |
+
+The first seven batches covered the same files as the Spark backfill and matched it exactly, line for line and repeat for repeat. The 25 minutes was no faster than Spark's, because the largest 3-hour batches (over 5 million lines) hit DuckDB's 3 GB memory limit and spilled to disk. Batches of 3 to 4 million lines took 33 to 74 seconds; those over 4.5 million took 144 to 343.
+
+Once the timer took over, one file an hour:
+
+| | |
+|---|---|
+| Events per hour | 0.92 to 1.65 million |
+| Time per run | 10 to 16 seconds |
+| Unreadable lines | 0 |
+
+Every repeat in these loads again lines up with a dropped connection in the collector's log:
+
+| Repeats | Cause |
+|---|---|
+| 4,630 | Drops at 14:56 and 15:53 |
+| 9,443 | Three drops between 16:02 and 16:08, and one at 17:20 |
+| 2,513 | A drop at 01:34 |
+| 1,707 | A drop at 03:58 |
+| 11,445 | Seven drops between 04:01 and 04:19 |
+
+The saved `store-vs-raw` query checks the whole path end to end, independently of the job: Athena counts the distinct events in the raw JSON files hour by hour, with the same event key, and compares them with the rows in the event store. Run for the first full day the store held, 25 October:
+
+| | |
+|---|---|
+| Hours | 24 |
+| Distinct raw events | 32,640,195 |
+| Rows in the event store | 32,640,195 |
+| Hours with an event missing from the store | 0 |
+| Hours with an extra row in the store | 0 |
+
+Every hour matched exactly, from 0.90 million events in the quietest hour (08:00) to 1.75 million in the busiest (21:00). Hour 20:00 is the 1,691,007 events used in the engine comparison above.
+
+## Connection drops and heavy jobs
+
+The collector's log shows a pattern in when Jetstream connections drop. Most drops are abrupt: the connection ends without a close frame.
+
+| When | Time | Drops |
+|---|---|---|
+| Spark backfill | 25 minutes | 4 |
+| Heaviest Spark hourly run | 4 minutes | 1 |
+| DuckDB backfill, including downloading the raw files | 27 minutes | 8 |
+| Everything else, from the first event to the afternoon of the third day | about 43 hours | 5 |
+
+That's about 14 drops an hour during a long, heavy job against about one every 9 hours the rest of the time, including during the normal 10 to 16 second hourly runs. One explanation fits: the collector syncs its file to disk every 5 seconds on its main loop, and while the disk is busy with a job's reads and spills, that sync can stall. While it's stalled, nothing reads from the connection, and Jetstream may drop a client that falls behind. That's not proven yet. The collector now syncs on a separate thread and logs both slow syncs and any pause of its main loop ([D-027](../decisions/engineering-decisions.md#d-027-sync-to-disk-on-its-own-thread)), so the next heavy job shows whether the disk stalls are real and whether the connection still drops. No events were lost either way: every drop was followed by a reconnect with the 5-second rewind.

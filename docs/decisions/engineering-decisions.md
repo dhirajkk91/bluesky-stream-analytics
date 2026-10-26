@@ -214,6 +214,8 @@ The hourly job that loads the event store runs on DuckDB instead of Spark. It wr
 
 **Why:** measured on the same real hour, DuckDB did the same work in 11 seconds against Spark's 82, with 1.6 GB of memory against 2.6 GB, and produced exactly the same events ([D-019](#d-019-spark-in-local-mode-on-the-server), [details](../validation/testing.md#spark-against-duckdb)). Spark spreads work across machines; at about 1.7 million events an hour on one 2-core server, there's nothing to spread. DuckDB also removes Java, the Iceberg jars and the JVM's memory overhead from the server.
 
+**In production:** the hourly runs take 10 to 16 seconds for about 1 to 1.6 million events, against 91 to 106 seconds on Spark for the same size of hour.
+
 **Checked before switching:** DuckDB created a partitioned table in Glue, appended to it, ran an insert-only `MERGE` twice (the second added nothing), and ran a `MERGE` that updated one row and deleted another. Athena then read the result correctly, including DuckDB's delete files.
 
 **What it gives up:**
@@ -237,3 +239,17 @@ Three changes to the event store's columns, measured from Iceberg's own per-colu
 **Why these:** no metric or projection uses `cid`; projections order a record's changes by `rev`. `event_time` already stores microseconds. And the URI's three parts rebuild it exactly.
 
 **Cost:** changing the columns means rebuilding the table from the raw files, which S3 keeps for 14 days. A use for `cid` later would need it added back and those 14 days reloaded.
+
+**Result:** after the rebuild, the table holds 47,956,749 events in 1.50 GB, **31.3 bytes an event against 77**, 59% smaller. At about 38 million events a day that's roughly 1.2 GB a day instead of 2.8. What's left is mostly random-looking identifiers (`subject_did`, `rkey`, `rev`, `subject_rkey`) at 4 to 6 bytes each, close to what they can compress to.
+
+## D-027: Sync to disk on its own thread
+
+**Found in production:** Jetstream dropped the collector's connection about 14 times an hour during long, heavy jobs on the server, and about once every 9 hours otherwise ([details](../validation/testing.md#connection-drops-and-heavy-jobs)). The collector synced its file to disk every 5 seconds on its main loop. When another job keeps the disk busy, one sync can take seconds, and while it waits nothing reads from the connection.
+
+**Fix:** the main loop now only hands the buffered events to the operating system, which is quick, and a single background thread runs the `fsync` and then saves the cursor. Events keep being read and written while it runs. The cursor still only moves once the `fsync` has returned, so it never points past data that isn't on disk, and shutdown waits for a sync in progress before saving the final cursor.
+
+**Measured from now on:** each status line reports the longest sync and the longest main-loop pause of the last minute, and a sync over 1 second or a pause of 2 seconds or more is logged as a warning. That turns the explanation into something the log can confirm or rule out.
+
+**Test:** a sync slowed to 0.3 seconds still lets events be written meanwhile, with the main loop never pausing more than 0.2 seconds. With the sync moved back onto the main loop, the same test fails.
+
+**Limits:** the main loop still writes to the file itself. If the operating system ever holds up those writes, which it can do when too much data is waiting to reach the disk, the loop could still stall. The pause measurement would show that.

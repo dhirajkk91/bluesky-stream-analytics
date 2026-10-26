@@ -109,4 +109,14 @@ The first version of the table, measured on its first 26.3 million events, was 2
 | `event_time` and `time_us` | 6% each |
 | Everything else | 6% |
 
-Random-looking identifiers barely compress, and `cid`, a 59-character content hash that no metric uses, was the biggest by far. The current table drops `cid` and `time_us` and splits `subject_uri` into its parts ([D-026](../decisions/engineering-decisions.md#d-026-a-leaner-event-store)).
+Random-looking identifiers barely compress, and `cid`, a 59-character content hash that no metric uses, was the biggest by far. The current table drops `cid` and `time_us` and splits `subject_uri` into its parts ([D-026](../decisions/engineering-decisions.md#d-026-a-leaner-event-store)). Rebuilt that way, it's **31.3 bytes an event**, about 1.2 GB a day:
+
+| Column | Bytes per event |
+|---|---|
+| `subject_did` | 6.1 |
+| `rkey` | 5.9 |
+| `rev` | 5.8 |
+| `event_time` | 4.4 |
+| `subject_rkey` | 3.9 |
+| `did` | 3.3 |
+| Everything else | under 2 together |

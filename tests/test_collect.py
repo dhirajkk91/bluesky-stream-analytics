@@ -2,6 +2,9 @@
 
 import asyncio
 import json
+import logging
+import threading
+import time
 from datetime import UTC, datetime
 from urllib.parse import parse_qs, urlparse
 
@@ -23,8 +26,9 @@ LAST_US = START_US + 999 * 10_000
 
 
 class FakeJetstream:
-    def __init__(self, disconnect_after: int | None = None) -> None:
+    def __init__(self, disconnect_after: int | None = None, pace: float = 0) -> None:
         self.disconnect_after = disconnect_after
+        self.pace = pace  # seconds between events, 0 sends as fast as possible
         self.cursors_requested: list[int | None] = []
 
     async def handler(self, ws) -> None:
@@ -38,6 +42,8 @@ class FakeJetstream:
                 continue
             await ws.send(raw)
             sent += 1
+            if self.pace:
+                await asyncio.sleep(self.pace)
             if self.disconnect_after is not None and sent == self.disconnect_after:
                 self.disconnect_after = None  # only drop the first connection
                 return
@@ -184,3 +190,78 @@ def test_failed_compression_stops_the_collector_and_saves_the_cursor(tmp_path, m
     assert saved == collector.writer.last_synced_time_us
     assert saved >= START_US + 500 * 10_000  # past the hour boundary
     assert list(tmp_path.rglob("*.jsonl.open"))  # left for recovery on the next start
+
+
+
+def slow_sync(monkeypatch, seconds: float, started: threading.Event | None = None):
+    """Make every disk sync take `seconds` longer; returns (written before, written after) per sync."""
+    real = collect.fsync_and_save
+    seen = []
+
+    def slow(fd, cursor_path, time_us):
+        if started:
+            started.set()
+        before = holder["collector"].writer.last_written_time_us
+        time.sleep(seconds)
+        seen.append((before, holder["collector"].writer.last_written_time_us))
+        real(fd, cursor_path, time_us)
+
+    holder = {}
+    monkeypatch.setattr(collect, "fsync_and_save", slow)
+    return holder, seen
+
+
+def test_slow_disk_sync_does_not_stop_reading_the_connection(tmp_path, monkeypatch):
+    holder, seen = slow_sync(monkeypatch, 0.3)
+
+    async def scenario():
+        fake = FakeJetstream(pace=0.002)
+        async with await serve_fake(fake) as server:
+            collector = Collector(tmp_path, url_of(server))
+            holder["collector"] = collector
+            await run_until(collector, LAST_US)
+            return collector
+
+    collector = asyncio.run(scenario())
+
+    assert any(after > before for before, after in seen), "no events were written while a sync was running"
+    assert collector._longest_pause < 0.2
+    assert set(collected_time_us(tmp_path)) == {json.loads(raw)["time_us"] for raw in EVENTS}
+    assert load_cursor(tmp_path / "state" / "cursor.json") == collector.writer.last_synced_time_us
+
+
+def test_slow_sync_is_logged(tmp_path, monkeypatch, caplog):
+    monkeypatch.setattr(collect, "SLOW_SYNC_SECONDS", 0.1)
+    holder, _ = slow_sync(monkeypatch, 0.2)
+
+    async def scenario():
+        fake = FakeJetstream(pace=0.001)
+        async with await serve_fake(fake) as server:
+            holder["collector"] = Collector(tmp_path, url_of(server))
+            await run_until(holder["collector"], LAST_US)
+
+    with caplog.at_level(logging.WARNING):
+        asyncio.run(scenario())
+    assert "Sync to disk took" in caplog.text
+
+
+def test_stop_waits_for_a_sync_in_progress_before_saving_the_cursor(tmp_path, monkeypatch):
+    started = threading.Event()
+    holder, seen = slow_sync(monkeypatch, 0.5, started)
+
+    async def scenario():
+        fake = FakeJetstream()
+        async with await serve_fake(fake) as server:
+            collector = Collector(tmp_path, url_of(server))
+            holder["collector"] = collector
+            task = asyncio.create_task(collector.run())
+            while not started.is_set():
+                await asyncio.sleep(0.01)
+            collector.stop()
+            await asyncio.wait_for(task, timeout=5)
+            return collector
+
+    collector = asyncio.run(scenario())
+
+    assert len(seen) == 1  # the sync that was running when stop came in finished
+    assert load_cursor(tmp_path / "state" / "cursor.json") == collector.writer.last_synced_time_us
