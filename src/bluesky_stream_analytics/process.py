@@ -2,12 +2,12 @@
 Append uploaded hourly files to the event store, then delete them.
 
 Reads every .jsonl.zst file under uploaded/ (files the uploader has already
-stored in S3), parses and de-duplicates the events, and inserts the ones the
-table doesn't have yet. Running it twice on the same files adds nothing.
+stored in S3), parses and de-duplicates the events with DuckDB, and appends the
+ones the store doesn't have yet. Running it twice on the same files adds nothing.
 
-Usage:
-    uv run process --warehouse s3://<bucket>/warehouse
-    uv run process --catalog hadoop --warehouse ./warehouse
+The store is an Iceberg table in the AWS Glue catalog. With --catalog local it
+is a table in a DuckDB file instead, for trying the job out without AWS.
+
 """
 
 import argparse
@@ -16,19 +16,19 @@ import time
 from dataclasses import dataclass
 from pathlib import Path
 
-from pyspark.sql import DataFrame, SparkSession
-from pyspark.sql import functions as F
+import boto3
+import duckdb
+from compression import zstd
 
+from bluesky_stream_analytics.event_store import COLUMNS, append_new, stage_batch
 from bluesky_stream_analytics.fs import fsync_directory
-from bluesky_stream_analytics.event_store import TABLE_COLUMNS, distinct_events, key_condition, parse_lines, readable
-from bluesky_stream_analytics.spark import CATALOG, build_session
 from bluesky_stream_analytics.upload import UPLOADED_DIR
 from bluesky_stream_analytics.writer import FINAL_SUFFIX
 
 log = logging.getLogger(__name__)
 
-DATABASE = "bluesky_store"
-EVENTS_TABLE = f"{CATALOG}.{DATABASE}.events"
+NAMESPACE = "bluesky_store"
+TABLE = "events"
 
 
 @dataclass
@@ -50,82 +50,70 @@ def pending_files(data_dir: Path) -> list[Path]:
     return sorted(root.rglob(f"*{FINAL_SUFFIX}"))
 
 
-def create_events_table(spark: SparkSession) -> None:
-    """Create the events table if it doesn't exist: Iceberg v2, partitioned by event hour."""
-    if spark.catalog.tableExists(EVENTS_TABLE):
-        return
-    spark.sql(
+def connect(threads: int, memory_limit: str, extension_dir: Path | None) -> duckdb.DuckDBPyConnection:
+    """A DuckDB connection pinned to UTC, with limits so it shares the server with the collector."""
+    con = duckdb.connect()
+    if extension_dir:
+        con.execute(f"SET extension_directory = '{extension_dir}'")
+    con.execute(f"SET threads = {threads}")
+    con.execute(f"SET memory_limit = '{memory_limit}'")
+    con.execute("SET TimeZone = 'UTC'")
+    return con
+
+
+def attach_glue(con: duckdb.DuckDBPyConnection, region: str) -> str:
+    """Attach the account's Glue catalog as `lake`, using the AWS credentials in the environment."""
+    account = boto3.client("sts", region_name=region).get_caller_identity()["Account"]
+    for extension in ("aws", "httpfs", "iceberg"):
+        con.install_extension(extension)
+        con.load_extension(extension)
+    con.execute(f"CREATE SECRET (TYPE s3, PROVIDER credential_chain, CHAIN 'env', REGION '{region}')")
+    con.execute(f"ATTACH '{account}' AS lake (TYPE iceberg, ENDPOINT_TYPE 'glue')")
+    return f"lake.{NAMESPACE}.{TABLE}"
+
+
+def create_glue_table(con: duckdb.DuckDBPyConnection, table: str, warehouse: str) -> None:
+    """Create the store if it doesn't exist: Iceberg v2, partitioned by event hour, Parquet with zstd."""
+    location = f"{warehouse.rstrip('/')}/{NAMESPACE}/{TABLE}"
+    con.execute(
         f"""
-        CREATE TABLE {EVENTS_TABLE} ({TABLE_COLUMNS})
-        USING iceberg
-        PARTITIONED BY (hours(event_time))
-        TBLPROPERTIES ('format-version' = '2', 'write.parquet.compression-codec' = 'zstd')
+        CREATE TABLE IF NOT EXISTS {table} ({COLUMNS})
+        PARTITIONED BY (hour(event_time))
+        WITH (
+            'format-version' = '2',
+            'location' = '{location}',
+            'write.parquet.compression-codec' = 'zstd'
+        )
         """
     )
-    # Rows sorted by record type and account inside each file compress much better.
-    spark.sql(f"ALTER TABLE {EVENTS_TABLE} WRITE LOCALLY ORDERED BY collection, did, time_us")
 
 
-def read_lines(spark: SparkSession, files: list[Path]) -> DataFrame:
-    """Read raw lines with source_file set to the path under the data folder, e.g. events/date=…/hour=…/x.jsonl.zst."""
-    return spark.read.text([str(f) for f in files]).select(
-        "value",
-        F.regexp_extract("_metadata.file_path", r"(events/date=[^/]+/hour=[^/]+/[^/]+)$", 1).alias("source_file"),
-    )
+def count_lines(files: list[Path]) -> int:
+    """Lines in the compressed files, counted while streaming them, never held in memory whole."""
+    total = 0
+    for path in files:
+        with zstd.open(path, "rb") as f:
+            while chunk := f.read(16 * 1024 * 1024):
+                total += chunk.count(b"\n")
+    return total
 
 
-def load_batch(spark: SparkSession, files: list[Path]) -> BatchResult:
-    """
-    Insert the events from these files that the table doesn't have yet.
-
-    The merge only looks at table rows in the batch's event-time range, so it
-    reads the hours the batch touches and nothing else.
-    """
+def load_batch(con: duckdb.DuckDBPyConnection, table: str, files: list[Path]) -> BatchResult:
+    """Append the events from these files that the store doesn't have yet. One commit per batch."""
     started = time.monotonic()
-    # A .zst file can't be split, so each file arrives as one partition.
-    # Spreading the lines out lets every core share the parsing.
-    lines = read_lines(spark, files).repartition(spark.sparkContext.defaultParallelism * 2)
-    parsed = parse_lines(lines).cache()
-    events = distinct_events(readable(parsed)).cache()
-
-    line_count = parsed.count()
-    parsed_count = readable(parsed).count()
-    bounds = events.agg(F.min("time_us").alias("lo"), F.max("time_us").alias("hi")).first()
-    event_count = events.count()
-
-    added = 0
-    if event_count:
-        before = _row_count(spark)
-        events.createOrReplaceTempView("batch")
-        spark.sql(
-            f"""
-            MERGE INTO {EVENTS_TABLE} t
-            USING batch s
-            ON t.event_time >= timestamp_micros({bounds.lo})
-               AND t.event_time <= timestamp_micros({bounds.hi})
-               AND {key_condition("t", "s")}
-            WHEN NOT MATCHED THEN INSERT *
-            """
-        )
-        added = _row_count(spark) - before
-
-    parsed.unpersist()
-    events.unpersist()
+    lines = count_lines(files)
+    readable, distinct = stage_batch(con, [str(f) for f in files])
+    added = append_new(con, table)
+    con.execute("DROP TABLE batch")
     return BatchResult(
         files=len(files),
-        lines=line_count,
-        unreadable=line_count - parsed_count,
-        duplicates_in_batch=parsed_count - event_count,
-        already_in_table=event_count - added,
+        lines=lines,
+        unreadable=lines - readable,
+        duplicates_in_batch=readable - distinct,
+        already_in_table=distinct - added,
         added=added,
         seconds=time.monotonic() - started,
     )
-
-
-def _row_count(spark: SparkSession) -> int:
-    """Total rows in the table, read from Iceberg metadata rather than by scanning data."""
-    row = spark.sql(f"SELECT summary['total-records'] AS n FROM {EVENTS_TABLE}.snapshots ORDER BY committed_at DESC LIMIT 1").first()
-    return int(row.n) if row and row.n is not None else 0
 
 
 def remove_files(data_dir: Path, files: list[Path]) -> None:
@@ -140,14 +128,13 @@ def remove_files(data_dir: Path, files: list[Path]) -> None:
             folder = folder.parent
 
 
-def process_all(spark: SparkSession, data_dir: Path, batch_files: int) -> list[BatchResult]:
-    """Process every pending file, a batch at a time, oldest first. Each batch is its own commit."""
-    create_events_table(spark)
+def process_all(con: duckdb.DuckDBPyConnection, table: str, data_dir: Path, batch_files: int) -> list[BatchResult]:
+    """Process every pending file, a batch at a time, oldest first."""
     files = pending_files(data_dir)
     results = []
     for i in range(0, len(files), batch_files):
         batch = files[i : i + batch_files]
-        result = load_batch(spark, batch)
+        result = load_batch(con, table, batch)
         remove_files(data_dir, batch)
         log.info(
             "Loaded %d files in %.0fs: %s lines, %s unreadable, %s repeated in the batch, %s already in the table, %s added",
@@ -166,31 +153,42 @@ def process_all(spark: SparkSession, data_dir: Path, batch_files: int) -> list[B
 def main() -> None:
     """Command-line entry point."""
     parser = argparse.ArgumentParser(description="Append uploaded hourly files to the event store.")
-    parser.add_argument("--warehouse", required=True, help="table location: s3://<bucket>/warehouse, or a folder with --catalog hadoop")
-    parser.add_argument("--catalog", choices=["glue", "hadoop"], default="glue", help="Iceberg catalog type (default: glue)")
+    parser.add_argument("--catalog", choices=["glue", "local"], default="glue", help="where the store lives (default: glue)")
+    parser.add_argument("--warehouse", help="s3://<bucket>/warehouse, for --catalog glue")
+    parser.add_argument("--database", type=Path, help="DuckDB file, for --catalog local")
     parser.add_argument("--data-dir", type=Path, default=Path("data"), help="collector data folder (default: ./data)")
-    parser.add_argument("--jars-dir", type=Path, default=Path(".jars"), help="folder with the Iceberg jars (default: ./.jars)")
     parser.add_argument("--batch-files", type=int, default=3, help="files per commit (default: 3)")
-    parser.add_argument("--driver-memory", default="4g", help="Spark memory (default: 4g)")
+    parser.add_argument("--threads", type=int, default=2, help="DuckDB threads (default: 2)")
+    parser.add_argument("--memory-limit", default="3GB", help="DuckDB memory limit (default: 3GB)")
+    parser.add_argument("--extension-dir", type=Path, help="where DuckDB keeps its extensions")
+    parser.add_argument("--region", default="us-east-1", help="AWS region (default: us-east-1)")
     args = parser.parse_args()
+    if args.catalog == "glue" and not args.warehouse:
+        parser.error("--warehouse is required with --catalog glue")
+    if args.catalog == "local" and not args.database:
+        parser.error("--database is required with --catalog local")
 
     logging.basicConfig(
         level=logging.INFO,
         format="%(asctime)s %(levelname)s %(message)s",
         datefmt="%Y-%m-%d %H:%M:%S",
     )
-    logging.getLogger("py4j").setLevel(logging.WARNING)
     if not pending_files(args.data_dir):
         log.info("Nothing to process")
         return
 
-    spark = build_session(args.warehouse, args.jars_dir, args.catalog, args.driver_memory)
+    con = connect(args.threads, args.memory_limit, args.extension_dir)
+    if args.catalog == "glue":
+        table = attach_glue(con, args.region)
+        create_glue_table(con, table, args.warehouse)
+    else:
+        con.execute(f"ATTACH '{args.database}' AS lake")
+        table = f"lake.main.{TABLE}"
+        con.execute(f"CREATE TABLE IF NOT EXISTS {table} ({COLUMNS})")
     try:
-        if args.catalog == "hadoop":
-            spark.sql(f"CREATE NAMESPACE IF NOT EXISTS {CATALOG}.{DATABASE}")
-        process_all(spark, args.data_dir, args.batch_files)
+        process_all(con, table, args.data_dir, args.batch_files)
     finally:
-        spark.stop()
+        con.close()
 
 
 if __name__ == "__main__":

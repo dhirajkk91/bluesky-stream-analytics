@@ -2,7 +2,7 @@
 
 ## Purpose
 
-Two clouds, each for what it does best within the budget: an always-free Oracle Cloud server runs the collector, the uploader and the Spark job, and AWS stores and queries the data. The AWS side is Terraform in `infra/aws/`; the server's services are unit files in `deploy/systemd/`. The reasons for the split are in [D-008](../decisions/engineering-decisions.md#d-008-collector-server-on-oracle-cloud-data-on-aws).
+An always-free Oracle Cloud server runs the collector, the uploader and the event store job, and AWS stores and queries the data. The AWS side is Terraform in `infra/aws/`, the server's services are unit files in `deploy/systemd/`. The reasons for the split are in [D-008](../decisions/engineering-decisions.md#d-008-collector-server-on-oracle-cloud-data-on-aws).
 
 ## Design
 
@@ -60,8 +60,8 @@ flowchart LR
 
 | Path | What |
 |---|---|
-| `/opt/bluesky-stream-analytics` | Git checkout of this repo, with its virtual environment and the Iceberg jars in `.jars/` |
-| `/var/lib/bluesky` | Collector data (`events/`, `state/cursor.json`) and files waiting for the Spark job (`uploaded/`) |
+| `/opt/bluesky-stream-analytics` | Git checkout of this repo, with its virtual environment |
+| `/var/lib/bluesky` | Collector data (`events/`, `state/cursor.json`), files waiting for the event store job (`uploaded/`), and DuckDB's extensions (`duckdb-extensions/`) |
 | `/etc/bluesky/upload.env` | Bucket name and the uploader's AWS key, `root:root`, mode `600` |
 | `/etc/bluesky/process.env` | Bucket name and the processor's AWS key, `root:root`, mode `600` |
 | `/etc/systemd/system/bluesky-*` | Copies of `deploy/systemd/` |
@@ -72,7 +72,7 @@ flowchart LR
 | `bluesky-upload.timer` | Starts `bluesky-upload.service` at :00, :10, :20 … every hour |
 | `bluesky-upload.service` | Runs `upload` once. systemd reads the key file as root and passes the values in as environment variables |
 | `bluesky-process.timer` | Starts `bluesky-process.service` at 20 past every hour |
-| `bluesky-process.service` | Runs the Spark job once, with Java 21. Lower CPU priority than the collector and capped at 6 GB of memory |
+| `bluesky-process.service` | Runs the event store job once. DuckDB is held to 2 threads and 3 GB, the service runs at a lower CPU priority than the collector, and systemd caps it at 4 GB of memory |
 
 All three run as an unprivileged `bluesky` user. systemd keeps the rest of the filesystem read-only to them, so the only place they can write is `/var/lib/bluesky`. Logs go to the systemd journal.
 

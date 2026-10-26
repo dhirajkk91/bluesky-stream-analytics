@@ -1,7 +1,7 @@
 # The event store: every Jetstream event exactly once, as an Iceberg table
-# written by the Spark job on the server. The job creates its own tables; this
-# database and the processor's permissions are all it needs. The processor can
-# read raw files but never change them.
+# written by the DuckDB job on the server through Glue's Iceberg REST endpoint.
+# The job creates its own tables; this database and the processor's permissions
+# are all it needs. The processor can read raw files but never change them.
 locals {
   warehouse_prefix = "warehouse"
   store_database   = "bluesky_store"
@@ -48,10 +48,24 @@ data "aws_iam_policy_document" "processor" {
     resources = ["${aws_s3_bucket.raw.arn}/${local.warehouse_prefix}/*"]
   }
 
+  # The Iceberg REST endpoint needs the catalog itself, and lists namespaces
+  # (database names only) when the job attaches it.
+  statement {
+    sid = "UseIcebergRestCatalog"
+    actions = [
+      "glue:GetCatalog",
+      "glue:GetDatabase",
+      "glue:GetDatabases",
+    ]
+    resources = [
+      "arn:aws:glue:${var.region}:${data.aws_caller_identity.current.account_id}:catalog",
+      "arn:aws:glue:${var.region}:${data.aws_caller_identity.current.account_id}:database/*",
+    ]
+  }
+
   statement {
     sid = "ManageLakeTables"
     actions = [
-      "glue:GetDatabase",
       "glue:GetTable",
       "glue:GetTables",
       "glue:CreateTable",

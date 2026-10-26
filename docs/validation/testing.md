@@ -2,7 +2,7 @@
 
 ## Automated tests
 
-`uv run pytest` runs everything below. None of it needs a network connection or an AWS account. The Spark tests need Java 17 or 21, and the Iceberg ones need the runtime jar in `.jars/` (`deploy/fetch-jars.sh` downloads it); without the jar they're skipped.
+`uv run pytest` runs everything below. None of it needs a network connection or an AWS account.
 
 | Area | What's checked |
 |---|---|
@@ -13,9 +13,8 @@
 | Uploader | Against a fake S3: exact bytes stored, an existing object is never overwritten, the local copy moves to `uploaded/` only after S3 has it, one failure doesn't stop the rest |
 | Background compression | A rollover returns without waiting for compression, close waits for it, and a failed compression is raised and leaves the `.open` file for recovery. End to end, a failed compression stops the collector with its cursor saved |
 | Uploader request shape | Against botocore's own S3 model, so a wrong parameter name or a mishandled `412` fails the test |
-| Event parsing | Real-shaped likes, reposts, follows, posts, deletes, identity and account events become the right typed columns. Post text never comes through, unreadable lines are dropped, `event_time` is UTC, and only true repeats are removed |
-| Event store load, end to end | Against a local Iceberg catalog: loads files and deletes them, loading the same events again adds nothing, a restart's rewind into the next hour's file is matched against the earlier hour, each batch is its own commit, rows are partitioned by event hour |
-| Merge stays within its hours | An earlier hour's data files are deleted from disk before the next load. The merge still succeeds, so it isn't reading them. The same setup with overlapping hours fails, which shows the check works |
+| Event parsing | Real-shaped likes, reposts, follows, posts, deletes, identity and account events become the right columns, with the parsing SQL the job runs. A like's target splits into account, record type and key, post text never comes through, unreadable lines are dropped, `event_time` is UTC to the microsecond, and only true repeats are removed |
+| Event store load, end to end | The job's own SQL against a table in a local DuckDB database: loads files and deletes them, loading the same events again adds nothing, a restart's rewind into the next hour's file is matched against the earlier hour, batches load oldest first. The Glue and Iceberg side is covered by the check below and by the real loads |
 | Backfill download | Only finished files under the requested day or hour, across pages of results, and nothing already waiting locally is downloaded again |
 
 ## Kill test
@@ -110,7 +109,7 @@ Compressing the hour still takes about 9 seconds, but it now happens next to the
 
 ## The event store on real data
 
-The first run of the event store job loaded everything collected so far: the raw files for 21 hours, downloaded back from S3 with `fetch-raw`.
+The first run of the event store job, then on Spark, loaded everything collected so far: the raw files for 21 hours, downloaded back from S3 with `fetch-raw`.
 
 | | |
 |---|---|
@@ -140,7 +139,7 @@ After the backfill, the timer took over. Each run picks up the hour the uploader
 | | |
 |---|---|
 | Events per hour | 1.63 to 1.89 million |
-| Time per run | 91 to 106 seconds, Spark startup included |
+| Time per run, on Spark | 91 to 106 seconds, startup included |
 | Files left waiting in `uploaded/` | none |
 
 The first hourly runs had repeats too, and again each one lines up with the collector's log:
@@ -166,4 +165,18 @@ On the server, with one real hour (1,691,007 events, 239 MB compressed), two run
 | Output | 130 MB | 151 MB |
 | Events | 1,691,007 | 1,691,007 |
 
-Both outputs matched exactly, and the event count is the same one the hourly job added for that hour. What this means for the choice of engine is in [D-019](../decisions/engineering-decisions.md#d-019-spark-in-local-mode-on-the-server).
+Both outputs matched exactly, and the event count is the same one the hourly job added for that hour. This is why the job moved to DuckDB ([D-025](../decisions/engineering-decisions.md#d-025-duckdb-for-the-hourly-job)). The benchmark now compares the two outputs row for row, and they stay identical with the leaner columns of [D-026](../decisions/engineering-decisions.md#d-026-a-leaner-event-store).
+
+## DuckDB writing to Glue
+
+Before the job moved to DuckDB, a throwaway script checked every operation it and the projections need, against a test table in the Glue catalog:
+
+| Step | Result |
+|---|---|
+| Create a table partitioned by hour | OK. Glue's endpoint needs the table's location given explicitly |
+| Append 2 rows | 2 added |
+| Insert-only `MERGE` of 1 existing and 1 new row | 1 added |
+| The same `MERGE` again | 0 added |
+| `MERGE` that updates one row and deletes another | 2 changed |
+| Read back in DuckDB | the expected 2 rows |
+| Read back in Athena | the same 2 rows, so Athena applies DuckDB's delete files |

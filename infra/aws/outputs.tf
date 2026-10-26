@@ -14,7 +14,7 @@ output "athena_workgroup" {
 }
 
 output "processor_user" {
-  description = "IAM user for the Spark job on the collector server."
+  description = "IAM user for the event store job on the collector server."
   value       = aws_iam_user.processor.name
 }
 
