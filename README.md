@@ -37,7 +37,9 @@ The data in S3 can now be queried with SQL in Athena, straight from the files, w
 
 The design is event-sourced rather than the usual bronze/silver/gold: the feed is a log of things that happened, so the log is the source of truth and everything else (current state, metrics) is derived from it and can be rebuilt by replaying it. [Here's why](docs/architectures/end-to-end-pipeline.md#architecture).
 
-Now I'm building that out. The event store is done: an hourly Spark job on the same server appends each finished hour to an Iceberg table in S3, with every event exactly once and no post text. Raw files now expire after 14 days, partly to save money, but mostly because they hold text people may have deleted. Spark is honestly more than this data needs, and [the decision log](docs/decisions/engineering-decisions.md#d-019-spark-in-local-mode-on-the-server) says so and why I used it anyway.
+The event store is done: an hourly job on the same server appends each finished hour to an Iceberg table in S3, with every event exactly once and no post text. Raw files now expire after 14 days, partly to save money, but mostly because they hold text people may have deleted.
+
+I built the job in Spark first, then ran the same work through DuckDB on a real hour: identical output, 11 seconds instead of 82. So it runs on DuckDB now, and [the decision log](docs/decisions/engineering-decisions.md#d-025-duckdb-for-the-hourly-job) has the numbers. Measuring the table's columns also showed one unused hash was 42% of its size, so that's gone too.
 
 ## The plan
 
@@ -70,14 +72,11 @@ uv run upload --bucket <bucket>   # copy finished hourly files to S3
 uv run pytest                     # run the tests
 ```
 
-The Spark job needs Java 17 or 21 (Spark 4.1 doesn't run on newer versions) and the Iceberg jars:
-
 ```bash
-./deploy/fetch-jars.sh                                       # download the Iceberg jars into .jars/
-uv run process --catalog hadoop --warehouse ./warehouse      # append data/uploaded/ to a local Iceberg event store
-uv run process --warehouse s3://<bucket>/warehouse           # the same, into S3 and the Glue catalog
+uv run process --catalog local --database events.duckdb      # append data/uploaded/ to a local DuckDB table
+uv run process --warehouse s3://<bucket>/warehouse           # the same, into the Iceberg table in Glue
 uv run fetch-raw --bucket <bucket> --date 2026-10-24         # download a day of raw files to load again
-uv run --group bench python benchmarks/compare_engines.py <raw files>   # Spark against DuckDB on the same files
+uv run --group bench python benchmarks/compare_engines.py <raw files>   # Spark against DuckDB, needs Java 17 or 21
 ```
 
 The AWS setup lives in `infra/aws/` as Terraform. The SQL in `sql/` gets saved into Athena by Terraform: open the Athena query editor, pick the `bluesky-stream-analytics` workgroup, run `create-events-view` once, then any of the checks.
@@ -88,7 +87,7 @@ The AWS setup lives in `infra/aws/` as Terraform. The SQL in `sql/` gets saved i
 - [End-to-end pipeline](docs/architectures/end-to-end-pipeline.md): how the pieces fit together
 - [Collector](docs/architectures/collector.md): saving every event and surviving crashes
 - [Uploader](docs/architectures/uploader.md): getting files safely into S3
-- [Event store](docs/architectures/event-store.md): the Spark job and the table with every event once
+- [Event store](docs/architectures/event-store.md): the hourly job and the table with every event once
 - [Query layer](docs/architectures/query-layer.md): SQL with Athena
 - [Infrastructure](docs/architectures/infrastructure.md): the Oracle server and the AWS side
 

@@ -5,7 +5,7 @@ Both engines do the same work: read the zstd JSON lines, parse the fields the
 event store keeps, drop repeats on the event key, and write Parquet with zstd.
 Each engine runs in its own process, so its startup, time and peak memory are
 measured separately, and both outputs are checked to hold the same events.
-
+The DuckDB side is the pipeline's own SQL; the Spark side is spark_transform.py.
 """
 
 import argparse
@@ -20,62 +20,21 @@ from pathlib import Path
 
 THREADS = 2
 
-DUCKDB_SQL = """
-COPY (
-    SELECT * FROM (
-        SELECT
-            did,
-            time_us,
-            make_timestamp(time_us) AS event_time,
-            kind,
-            "commit".collection AS collection,
-            "commit".operation AS operation,
-            "commit".rkey AS rkey,
-            "commit".rev AS rev,
-            "commit".cid AS cid,
-            coalesce(identity.seq, account.seq) AS seq,
-            CASE
-                WHEN "commit".collection IN ('app.bsky.graph.follow', 'app.bsky.graph.block')
-                    THEN "commit".record ->> '$.subject'
-                ELSE nullif(regexp_extract("commit".record ->> '$.subject.uri', '^at://([^/]+)/', 1), '')
-            END AS subject_did,
-            CASE WHEN "commit".collection IN ('app.bsky.feed.like', 'app.bsky.feed.repost')
-                THEN "commit".record ->> '$.subject.uri' END AS subject_uri,
-            "commit".record ->> '$.reply.parent.uri' AS reply_parent_uri,
-            "commit".record ->> '$.reply.root.uri' AS reply_root_uri,
-            CASE WHEN "commit".collection = 'app.bsky.feed.post'
-                THEN CAST("commit".record -> '$.langs' AS VARCHAR[]) END AS langs,
-            identity.handle AS handle,
-            account.active AS account_active,
-            account.status AS account_status
-        FROM read_ndjson(
-            $files,
-            compression = 'zstd',
-            ignore_errors = true,
-            columns = {
-                'did': 'VARCHAR',
-                'time_us': 'BIGINT',
-                'kind': 'VARCHAR',
-                'commit': 'STRUCT(rev VARCHAR, operation VARCHAR, collection VARCHAR, rkey VARCHAR, cid VARCHAR, record JSON)',
-                'identity': 'STRUCT(seq BIGINT, handle VARCHAR)',
-                'account': 'STRUCT(seq BIGINT, active BOOLEAN, status VARCHAR)'
-            }
-        )
-        WHERE did IS NOT NULL AND time_us IS NOT NULL AND kind IS NOT NULL
-    )
-    QUALIFY row_number() OVER (PARTITION BY did, kind, collection, rkey, rev, operation, seq) = 1
-    ORDER BY collection, did, time_us
-) TO '{out}' (FORMAT parquet, COMPRESSION zstd)
-"""
-
 
 def run_duckdb(files: list[str], out: Path) -> dict:
     """Returns this process's peak memory and CPU time."""
     import duckdb
 
+    from bluesky_stream_analytics.event_store import stage_batch
+
     con = duckdb.connect()
     con.execute(f"SET threads = {THREADS}")
-    con.execute(DUCKDB_SQL.replace("{out}", str(out / "events.parquet")), {"files": files})
+    con.execute("SET TimeZone = 'UTC'")
+    stage_batch(con, files)
+    con.execute(
+        f"COPY (SELECT * EXCLUDE (source_file) FROM batch ORDER BY collection, did, event_time) "
+        f"TO '{out / 'events.parquet'}' (FORMAT parquet, COMPRESSION zstd)"
+    )
     return _usage("self")
 
 
@@ -83,9 +42,8 @@ def run_spark(files: list[str], out: Path) -> dict:
     """Returns the peak memory and CPU time of the Spark JVM plus this Python process."""
     os.environ.setdefault("PYSPARK_PYTHON", sys.executable)
     from pyspark.sql import SparkSession
-    from pyspark.sql import functions as F
 
-    from bluesky_stream_analytics.event_store import distinct_events, parse_lines, readable
+    from spark_transform import distinct_events, parse_events
 
     spark = (
         SparkSession.builder.master(f"local[{THREADS}]")
@@ -99,10 +57,9 @@ def run_spark(files: list[str], out: Path) -> dict:
         .getOrCreate()
     )
     spark.sparkContext.setLogLevel("ERROR")
-    lines = spark.read.text(files).select("value", F.lit("").alias("source_file"))
-    lines = lines.repartition(spark.sparkContext.defaultParallelism * 2)
-    events = distinct_events(readable(parse_lines(lines))).drop("source_file")
-    events = events.sortWithinPartitions("collection", "did", "time_us")
+    lines = spark.read.text(files).repartition(spark.sparkContext.defaultParallelism * 2)
+    events = distinct_events(parse_events(lines))
+    events = events.sortWithinPartitions("collection", "did", "event_time")
     events.write.mode("overwrite").option("compression", "zstd").parquet(str(out))
     jvm = _usage(spark.sparkContext._jvm.java.lang.ProcessHandle.current().pid())
     driver = _usage("self")
@@ -128,10 +85,23 @@ def summarize(out: Path) -> dict:
 
     row = (
         duckdb.connect()
-        .execute(f"SELECT count(*), sum(time_us), count(DISTINCT did) FROM read_parquet('{out}/*.parquet')")
+        .execute(f"SELECT count(*), sum(epoch_us(event_time)), count(DISTINCT did) FROM read_parquet('{out}/*.parquet')")
         .fetchone()
     )
     return {"rows": row[0], "sum_time_us": row[1], "accounts": row[2]}
+
+
+def rows_in_only_one(a: Path, b: Path) -> int:
+    """How many rows appear in one engine's output but not the other's, counting repeats."""
+    import duckdb
+
+    con = duckdb.connect()
+    con.execute("SET TimeZone = 'UTC'")
+    left, right = f"read_parquet('{a}/*.parquet')", f"read_parquet('{b}/*.parquet')"
+    return con.execute(
+        f"SELECT (SELECT count(*) FROM (FROM {left} EXCEPT ALL FROM {right}))"
+        f" + (SELECT count(*) FROM (FROM {right} EXCEPT ALL FROM {left}))"
+    ).fetchone()[0]
 
 
 def measure(engine: str, files: list[str], workdir: Path) -> dict:
@@ -179,10 +149,10 @@ def main() -> None:
                 result = measure(engine, files, Path(tmp))
                 results.append(result)
                 print(json.dumps(result), flush=True)
+        differing = rows_in_only_one(Path(tmp) / "duckdb", Path(tmp) / "spark")
 
-    same = {(r["rows"], r["sum_time_us"], r["accounts"]) for r in results}
-    print("Outputs match" if len(same) == 1 else "OUTPUTS DIFFER", flush=True)
-    sys.exit(0 if len(same) == 1 else 1)
+    print("Outputs identical, row for row" if differing == 0 else f"OUTPUTS DIFFER in {differing:,} rows", flush=True)
+    sys.exit(0 if differing == 0 else 1)
 
 
 if __name__ == "__main__":

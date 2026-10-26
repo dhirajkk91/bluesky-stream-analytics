@@ -6,7 +6,7 @@ The pipeline turns Bluesky's public Jetstream feed into an event log collected n
 
 - [Collector](collector.md): connecting, writing hourly files, resuming after a crash
 - [Uploader](uploader.md): moving finished files to S3
-- [Event store](event-store.md): the Spark job that keeps every event exactly once
+- [Event store](event-store.md): the hourly DuckDB job that keeps every event exactly once
 - [Query layer](query-layer.md): SQL on the raw files and the event store with Athena
 - [Infrastructure](infrastructure.md): the Oracle server and the AWS resources
 
@@ -52,7 +52,7 @@ flowchart LR
         C["collect<br/>systemd service"]
         F["/var/lib/bluesky<br/>hourly .jsonl.zst files<br/>+ cursor.json"]
         U["upload<br/>systemd timer, every 10 min"]
-        P["process<br/>Spark, hourly at :20"]
+        P["process<br/>DuckDB, hourly at :20"]
     end
 
     subgraph AWS["AWS, us-east-1"]
@@ -74,7 +74,7 @@ flowchart LR
 1. **Collect.** `collect` keeps one WebSocket open to a fixed Jetstream server and appends every event, exactly as received, to the current hour's file. Every 5 seconds it syncs the file to disk and then saves its position. After a crash it repairs any half-written file and resumes 5 seconds before its last saved position.
 2. **Finish the hour.** When an event from the next hour arrives, the current file is compressed with zstd and becomes read-only from then on.
 3. **Upload.** Every 10 minutes `upload` sends each finished file to S3 under the same path, with a checksum S3 verifies. Only after S3 confirms does it move the local copy to `uploaded/` for processing.
-4. **Process.** Every hour `process` loads the waiting files with Spark, removes duplicates, and appends the events the event store doesn't have yet. Then it deletes the local copies.
+4. **Process.** Every hour `process` loads the waiting files with DuckDB, removes duplicates, and appends the events the event store doesn't have yet. Then it deletes the local copies.
 5. **Query.** Athena reads the raw files in place for checks, and the event store for everything else.
 
 There is also `watch`, which prints a live summary of the stream and saves nothing. It's for checking the feed from any machine.
@@ -113,14 +113,13 @@ src/bluesky_stream_analytics/
     writer.py        hourly files, compression, crash recovery
     cursor.py        loads and saves the resume point
     upload.py        copies finished files to S3, then hands them to the processor
-    process.py       Spark job: appends handed-over files to the event store
-    event_store.py   parsing and de-duplication rules for the event store
-    spark.py         Spark session with the Iceberg catalog
+    process.py       hourly job: appends handed-over files to the event store
+    event_store.py   the SQL that parses, de-duplicates and appends events
     fetch_raw.py     downloads raw files from S3 for backfills
     fs.py            helper for durable renames
 tests/               unit and end-to-end tests
 infra/aws/           Terraform for the bucket, IAM users, the budget, Glue and Athena
 sql/                 the events view and the check queries
-deploy/              systemd units, env file examples, and the jar download script
-benchmarks/          Spark against DuckDB on the event store's transform
+deploy/              systemd units and env file examples
+benchmarks/          the Spark version of the transform, and the Spark against DuckDB comparison
 ```

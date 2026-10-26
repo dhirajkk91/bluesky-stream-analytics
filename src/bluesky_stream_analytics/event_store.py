@@ -1,118 +1,129 @@
 """
-Turn raw Jetstream lines into typed rows for the event store.
+SQL that turns raw Jetstream lines into rows for the event store, run with DuckDB.
 
 One row per distinct event. Commits are identified by account, record type,
 record key, revision and operation; identity and account events by their
-sequence number. Post text and other record content are not kept.
+sequence number. Record content (post text and the like) is not kept, and
+neither are values the table can rebuild, such as a liked post's full URI.
 """
 
-from pyspark.sql import Column, DataFrame
-from pyspark.sql import functions as F
+import duckdb
 
 EVENT_KEY = ["did", "kind", "collection", "rkey", "rev", "operation", "seq"]
 
-# Only the fields the table keeps. A follow's subject is an account DID; a
-# like's or repost's is an object with the post's URI. Declared as a string,
-# Spark keeps the object as JSON text.
-EVENT_SCHEMA = """
-    did string,
-    time_us bigint,
-    kind string,
-    commit struct<
-        rev string, operation string, collection string, rkey string, cid string,
-        record struct<subject string, langs array<string>, reply struct<parent struct<uri string>, root struct<uri string>>>
-    >,
-    identity struct<seq bigint, handle string>,
-    account struct<seq bigint, active boolean, status string>
+COLUMNS = """
+    did VARCHAR,
+    event_time TIMESTAMPTZ,
+    kind VARCHAR,
+    collection VARCHAR,
+    operation VARCHAR,
+    rkey VARCHAR,
+    rev VARCHAR,
+    seq BIGINT,
+    subject_did VARCHAR,
+    subject_collection VARCHAR,
+    subject_rkey VARCHAR,
+    reply_parent_uri VARCHAR,
+    reply_root_uri VARCHAR,
+    langs VARCHAR[],
+    handle VARCHAR,
+    account_active BOOLEAN,
+    account_status VARCHAR,
+    source_file VARCHAR
 """
 
-LIKE = "app.bsky.feed.like"
-REPOST = "app.bsky.feed.repost"
-FOLLOW = "app.bsky.graph.follow"
-BLOCK = "app.bsky.graph.block"
-POST = "app.bsky.feed.post"
+# Only the fields the table keeps. A record stays JSON so a follow's subject (an
+# account) and a like's subject (an object with the post's URI) can both be read.
+_RAW_COLUMNS = """{
+    'did': 'VARCHAR',
+    'time_us': 'BIGINT',
+    'kind': 'VARCHAR',
+    'commit': 'STRUCT(rev VARCHAR, operation VARCHAR, collection VARCHAR, rkey VARCHAR, record JSON)',
+    'identity': 'STRUCT(seq BIGINT, handle VARCHAR)',
+    'account': 'STRUCT(seq BIGINT, active BOOLEAN, status VARCHAR)'
+}"""
 
-TABLE_COLUMNS = """
-    did string NOT NULL,
-    time_us bigint NOT NULL,
-    event_time timestamp NOT NULL,
-    kind string NOT NULL,
-    collection string,
-    operation string,
-    rkey string,
-    rev string,
-    cid string,
-    seq bigint,
-    subject_did string,
-    subject_uri string,
-    reply_parent_uri string,
-    reply_root_uri string,
-    langs array<string>,
-    handle string,
-    account_active boolean,
-    account_status string,
-    source_file string NOT NULL
+# Likes and reposts point at a record with an at:// URI: at://<account>/<collection>/<rkey>.
+_SUBJECT_URI = "\"commit\".record ->> '$.subject.uri'"
+_URI_PART = "nullif(regexp_extract(" + _SUBJECT_URI + ", '^at://([^/]+)/([^/]+)/([^/]+)$', {n}), '')"
+
+PARSE = f"""
+SELECT
+    did,
+    make_timestamptz(time_us) AS event_time,
+    kind,
+    "commit".collection AS collection,
+    "commit".operation AS operation,
+    "commit".rkey AS rkey,
+    "commit".rev AS rev,
+    coalesce(identity.seq, account.seq) AS seq,
+    CASE
+        WHEN "commit".collection IN ('app.bsky.graph.follow', 'app.bsky.graph.block') THEN "commit".record ->> '$.subject'
+        ELSE {_URI_PART.format(n=1)}
+    END AS subject_did,
+    {_URI_PART.format(n=2)} AS subject_collection,
+    {_URI_PART.format(n=3)} AS subject_rkey,
+    "commit".record ->> '$.reply.parent.uri' AS reply_parent_uri,
+    "commit".record ->> '$.reply.root.uri' AS reply_root_uri,
+    CASE WHEN "commit".collection = 'app.bsky.feed.post'
+        THEN CAST("commit".record -> '$.langs' AS VARCHAR[]) END AS langs,
+    identity.handle AS handle,
+    account.active AS account_active,
+    account.status AS account_status,
+    regexp_extract(filename, '(events/date=[^/]+/hour=[^/]+/[^/]+)$', 1) AS source_file
+FROM read_ndjson($files, compression = 'zstd', ignore_errors = true, filename = true, columns = {_RAW_COLUMNS})
+WHERE did IS NOT NULL AND time_us IS NOT NULL AND kind IS NOT NULL
 """
 
 
-def parse_events(lines: DataFrame) -> DataFrame:
-    """Parse raw lines into typed event rows, dropping lines that aren't valid events."""
-    return readable(parse_lines(lines))
+def key_match(left: str, right: str) -> str:
+    """SQL condition for two rows with the same event key. Null-safe, since commits have no seq and vice versa."""
+    return " AND ".join(f"{left}.{c} IS NOT DISTINCT FROM {right}.{c}" for c in EVENT_KEY)
 
 
-def parse_lines(lines: DataFrame) -> DataFrame:
+def stage_batch(con: duckdb.DuckDBPyConnection, files: list[str]) -> tuple[int, int]:
     """
-    Parse raw lines into typed rows, one per line.
+    Parse the files into a temp table `batch`, one row per event key.
 
-    Expects a `value` column with one JSON event per row and a `source_file`
-    column. A line that isn't a valid event comes out with did, time_us or kind
-    null; `readable` drops those.
+    Returns (readable rows, distinct events).
     """
-    parsed = lines.select(F.from_json("value", EVENT_SCHEMA).alias("e"), "source_file")
-    collection = F.col("e.commit.collection")
-    subject = F.col("e.commit.record.subject")
-    subject_uri = F.when(collection.isin(LIKE, REPOST), F.get_json_object(subject, "$.uri"))
-
-    return parsed.select(
-        F.col("e.did").alias("did"),
-        F.col("e.time_us").alias("time_us"),
-        F.timestamp_micros("e.time_us").alias("event_time"),
-        F.col("e.kind").alias("kind"),
-        collection.alias("collection"),
-        F.col("e.commit.operation").alias("operation"),
-        F.col("e.commit.rkey").alias("rkey"),
-        F.col("e.commit.rev").alias("rev"),
-        F.col("e.commit.cid").alias("cid"),
-        F.coalesce("e.identity.seq", "e.account.seq").alias("seq"),
-        F.when(collection.isin(FOLLOW, BLOCK), subject)
-        .otherwise(_did_of(subject_uri))
-        .alias("subject_did"),
-        subject_uri.alias("subject_uri"),
-        F.col("e.commit.record.reply.parent.uri").alias("reply_parent_uri"),
-        F.col("e.commit.record.reply.root.uri").alias("reply_root_uri"),
-        F.when(collection == POST, F.col("e.commit.record.langs")).alias("langs"),
-        F.col("e.identity.handle").alias("handle"),
-        F.col("e.account.active").alias("account_active"),
-        F.col("e.account.status").alias("account_status"),
-        "source_file",
+    con.execute(f"CREATE OR REPLACE TEMP TABLE parsed AS {PARSE}", {"files": files})
+    readable = con.execute("SELECT count(*) FROM parsed").fetchone()[0]
+    con.execute(
+        f"""
+        CREATE OR REPLACE TEMP TABLE batch AS
+        SELECT * FROM parsed
+        QUALIFY row_number() OVER (PARTITION BY {", ".join(EVENT_KEY)} ORDER BY source_file) = 1
+        """
     )
+    con.execute("DROP TABLE parsed")
+    distinct = con.execute("SELECT count(*) FROM batch").fetchone()[0]
+    return readable, distinct
 
 
-def readable(rows: DataFrame) -> DataFrame:
-    """Keep rows that parsed into an event: they have an account, a time and a kind."""
-    return rows.where(F.col("did").isNotNull() & F.col("time_us").isNotNull() & F.col("kind").isNotNull())
+def append_new(con: duckdb.DuckDBPyConnection, table: str) -> int:
+    """
+    Append the rows in `batch` that `table` doesn't have yet. Returns how many were added.
 
-
-def _did_of(at_uri: Column) -> Column:
-    """The account part of an at:// URI, e.g. did:plc:abc from at://did:plc:abc/app.bsky.feed.post/xyz."""
-    return F.nullif(F.regexp_extract(at_uri, r"^at://([^/]+)/", 1), F.lit(""))
-
-
-def distinct_events(events: DataFrame) -> DataFrame:
-    """Keep one row per event key. Copies of an event are identical apart from source_file."""
-    return events.dropDuplicates(EVENT_KEY)
-
-
-def key_condition(target: str, source: str) -> str:
-    """SQL condition matching rows with the same event key. Null-safe, since commits have no seq and vice versa."""
-    return " AND ".join(f"{target}.{c} <=> {source}.{c}" for c in EVENT_KEY)
+    Only table rows inside the batch's event-time range are compared, so an
+    Iceberg table only reads the files that could hold a match.
+    """
+    lo, hi = con.execute("SELECT epoch_us(min(event_time)), epoch_us(max(event_time)) FROM batch").fetchone()
+    if lo is None:
+        return 0
+    con.execute(
+        f"""
+        CREATE OR REPLACE TEMP TABLE new_rows AS
+        SELECT b.* FROM batch b
+        ANTI JOIN (
+            SELECT {", ".join(EVENT_KEY)} FROM {table}
+            WHERE event_time >= make_timestamptz({lo}) AND event_time <= make_timestamptz({hi})
+        ) t ON {key_match("b", "t")}
+        """
+    )
+    added = con.execute("SELECT count(*) FROM new_rows").fetchone()[0]
+    if added:
+        # Sorted by record type and account, the files compress much better than in arrival order.
+        con.execute(f"INSERT INTO {table} SELECT * FROM new_rows ORDER BY collection, did, event_time")
+    con.execute("DROP TABLE new_rows")
+    return added

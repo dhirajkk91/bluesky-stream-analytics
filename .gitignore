@@ -7,5 +7,5 @@ infra/**/.terraform/
 infra/**/*.tfstate
 infra/**/*.tfstate.*
 infra/**/terraform.tfvars
-.jars/
-warehouse/
+*.duckdb
+*.duckdb.wal

@@ -9,7 +9,7 @@ authors = [
 requires-python = ">=3.14"
 dependencies = [
     "boto3>=1.43",
-    "pyspark>=4.1.3,<4.2",
+    "duckdb>=2.0.0",
     "websockets>=17.3",
 ]
 
@@ -22,7 +22,7 @@ fetch-raw = "bluesky_stream_analytics.fetch_raw:main"
 
 [dependency-groups]
 bench = [
-    "duckdb>=2.0.0",
+    "pyspark>=4.1.3,<4.2",
 ]
 dev = [
     "pytest>=9.1.1",

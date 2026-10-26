@@ -143,6 +143,8 @@ Reads and writes are split in the CQRS sense: the store is shaped for appending,
 
 ## D-019: Spark in local mode on the server
 
+**Replaced by [D-025](#d-025-duckdb-for-the-hourly-job).** Kept here because the measurement below is why.
+
 The job that loads the event store is PySpark running on the Oracle server in local mode (one machine, every core), started by a systemd timer.
 
 **Honestly:** this data doesn't need Spark. An hour is about 1.5 million events, roughly 1 GB of JSON, and DuckDB or Polars on one machine would handle it. I picked Spark because the compute is free on the server, it writes Iceberg tables with `MERGE` well, and the same job would run on a cluster (EMR, Glue) unchanged if the volume grew 100 times.
@@ -172,12 +174,12 @@ The event store, and later the projections and marts, are Iceberg tables stored 
 
 **Format v2, set explicitly,** because that's what Athena supports today. The job creates its own tables; Terraform only makes the database and the job's permissions.
 
-## D-021: Hourly, insert-only merge limited to the batch's time range
+## D-021: Hourly, insert-only appends limited to the batch's time range
 
-Every hour the job loads whatever the uploader has handed over and runs `MERGE … WHEN NOT MATCHED THEN INSERT`, joining on the event key and on the batch's `event_time` range.
+Every hour the job loads whatever the uploader has handed over, drops the events the table already has with an anti-join on the event key, and appends the rest in one commit. The anti-join only reads table rows inside the batch's `event_time` range.
 
 - **Insert-only** because an event never changes once it's sent. A repeat is the same event delivered again, so there's nothing to update.
-- **Limited to the batch's range** so the merge only reads the table files that could hold a match: the hour being loaded, plus the previous one after a restart's rewind. A test deletes an earlier hour's files and checks the merge still succeeds, so it can't be quietly scanning the whole table.
+- **Limited to the batch's range** so only the table files that could hold a match are read: the hour being loaded, plus the previous one after a restart's rewind. That keeps each run the same size however big the table gets.
 - **Hourly rather than daily:** both cost the same, since the compute is free and the reads are the same in total. Hourly keeps data about 1.5 hours fresh instead of up to 2 days, and keeps a failed run's impact to one hour. Daily metrics in later layers will run daily.
 
 Loading the same files twice adds nothing, so a crash at any point is fixed by running again.
@@ -205,3 +207,33 @@ An S3 lifecycle rule deletes `raw/` files after 14 days.
 The events table keeps what metrics need (who, when, what kind, aimed at whom, reply links, languages) and none of the record content: no post text, no profile text, no images or links.
 
 **Why:** content that's deleted on Bluesky would otherwise live on in an append-only log kept for months, where it can't be removed without breaking the log's rule. Nothing planned needs it. Trending topics can come from hashtags, which can be added as their own column when that step comes.
+
+## D-025: DuckDB for the hourly job
+
+The hourly job that loads the event store runs on DuckDB instead of Spark. It writes the same Iceberg table, through Glue's Iceberg REST endpoint.
+
+**Why:** measured on the same real hour, DuckDB did the same work in 11 seconds against Spark's 82, with 1.6 GB of memory against 2.6 GB, and produced exactly the same events ([D-019](#d-019-spark-in-local-mode-on-the-server), [details](../validation/testing.md#spark-against-duckdb)). Spark spreads work across machines; at about 1.7 million events an hour on one 2-core server, there's nothing to spread. DuckDB also removes Java, the Iceberg jars and the JVM's memory overhead from the server.
+
+**Checked before switching:** DuckDB created a partitioned table in Glue, appended to it, ran an insert-only `MERGE` twice (the second added nothing), and ran a `MERGE` that updated one row and deleted another. Athena then read the result correctly, including DuckDB's delete files.
+
+**What it gives up:**
+
+- Glue support in DuckDB's Iceberg extension is marked experimental. The job fails loudly if a write fails, and nothing local is deleted until a commit succeeds, so a failure costs a retry, not data.
+- DuckDB writes deletes as small delete files (merge-on-read) rather than rewriting data files. That matters for the projections, which will need regular compaction.
+- DuckDB doesn't run Iceberg table maintenance (compacting files, expiring old snapshots). Athena's `OPTIMIZE` and `VACUUM` can.
+
+**Spark isn't gone.** `benchmarks/spark_transform.py` keeps the Spark version, and the benchmark checks the two produce identical rows. If a job ever outgrows one machine (recomputing months of history, for example), that's where Spark comes back, on a cluster started only for that job.
+
+## D-026: A leaner event store
+
+Three changes to the event store's columns, measured from Iceberg's own per-column sizes on the first 26.3 million events:
+
+| Change | Share of the table it took |
+|---|---|
+| Drop `cid`, the record's 59-character content hash | 42% |
+| Drop `time_us`, the same value as `event_time` | 6% |
+| Split `subject_uri` into `subject_collection` and `subject_rkey` | Most of 16%, since `subject_did` already held the account |
+
+**Why these:** no metric or projection uses `cid`; projections order a record's changes by `rev`. `event_time` already stores microseconds. And the URI's three parts rebuild it exactly.
+
+**Cost:** changing the columns means rebuilding the table from the raw files, which S3 keeps for 14 days. A use for `cid` later would need it added back and those 14 days reloaded.
