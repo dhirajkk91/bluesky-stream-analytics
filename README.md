@@ -77,6 +77,7 @@ The Spark job needs Java 17 or 21 (Spark 4.1 doesn't run on newer versions) and 
 uv run process --catalog hadoop --warehouse ./warehouse      # append data/uploaded/ to a local Iceberg event store
 uv run process --warehouse s3://<bucket>/warehouse           # the same, into S3 and the Glue catalog
 uv run fetch-raw --bucket <bucket> --date 2026-10-24         # download a day of raw files to load again
+uv run --group bench python benchmarks/compare_engines.py <raw files>   # Spark against DuckDB on the same files
 ```
 
 The AWS setup lives in `infra/aws/` as Terraform. The SQL in `sql/` gets saved into Athena by Terraform: open the Athena query editor, pick the `bluesky-stream-analytics` workgroup, run `create-events-view` once, then any of the checks.

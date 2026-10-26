@@ -122,4 +122,5 @@ tests/               unit and end-to-end tests
 infra/aws/           Terraform for the bucket, IAM users, the budget, Glue and Athena
 sql/                 the events view and the check queries
 deploy/              systemd units, env file examples, and the jar download script
+benchmarks/          Spark against DuckDB on the event store's transform
 ```
