@@ -20,6 +20,7 @@ upload = "bluesky_stream_analytics.upload:main"
 process = "bluesky_stream_analytics.process:main"
 fetch-raw = "bluesky_stream_analytics.fetch_raw:main"
 project = "bluesky_stream_analytics.projections:main"
+compact = "bluesky_stream_analytics.compact:main"
 
 [dependency-groups]
 bench = [

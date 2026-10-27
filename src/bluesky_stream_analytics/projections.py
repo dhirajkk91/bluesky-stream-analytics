@@ -15,15 +15,17 @@ exists. Appending the same events twice, or in any order, gives the same answer.
 """
 
 import argparse
+import json
 import logging
 import time
 from dataclasses import dataclass
 from itertools import groupby
 from pathlib import Path
 
+import boto3
 import duckdb
 
-from bluesky_stream_analytics.process import attach_glue, connect
+from bluesky_stream_analytics.process import NAMESPACE, TABLE, attach_glue, connect
 
 log = logging.getLogger(__name__)
 
@@ -67,15 +69,17 @@ RUN_COLUMNS = """
     files INTEGER,
     events_folded BIGINT,
     versions_added BIGINT,
-    deletes_added BIGINT
+    deletes_added BIGINT,
+    oldest_delete_time TIMESTAMPTZ
 """
 
-# Table name -> (columns, Iceberg partitioning). Records are partitioned by when
-# they were created, so a query on one month of likes reads only that month.
+# Table name -> (columns, Iceberg partitioning). Records are partitioned by the
+# day they were created, so compaction can rewrite only the recent days, where
+# most deletes land, and a query on one day of likes reads only that day.
 # Delete markers are partitioned by when the delete happened, so each run
 # writes to the current month only, however old the deleted records are.
 TABLES = {
-    "records": (RECORD_COLUMNS, "collection, month(record_time)"),
+    "records": (RECORD_COLUMNS, "collection, day(record_time)"),
     "record_deletes": (DELETE_COLUMNS, "collection, month(event_time)"),
     "projection_runs": (RUN_COLUMNS, None),
 }
@@ -146,28 +150,56 @@ def last_sequence(con: duckdb.DuckDBPyConnection, schema: str) -> int:
 
 
 def store_files(con: duckdb.DuckDBPyConnection, events_table: str) -> list[tuple[str, str, int]]:
-    """The event store's live files, from Iceberg's metadata: (content, path, data sequence number)."""
+    """The event store's live files, from Iceberg's metadata: (content, path, sequence number of the commit that added it)."""
     return con.execute(
         f"""
-        SELECT content, file_path, data_sequence_number
+        SELECT content, file_path, file_sequence_number
         FROM iceberg_metadata({events_table})
         WHERE status <> 'DELETED'
         """
     ).fetchall()
 
 
-def new_files_by_sequence(files: list[tuple[str, str, int]], after: int) -> list[tuple[int, list[str]]]:
+def store_metadata(region: str, database: str = NAMESPACE, table: str = TABLE) -> dict:
+    """The event store's current Iceberg metadata, found through Glue."""
+    location = boto3.client("glue", region_name=region).get_table(DatabaseName=database, Name=table)
+    bucket, key = location["Table"]["Parameters"]["metadata_location"].removeprefix("s3://").split("/", 1)
+    body = boto3.client("s3", region_name=region).get_object(Bucket=bucket, Key=key)["Body"].read()
+    return json.loads(body)
+
+
+def rewrite_sequences(metadata: dict) -> set[int]:
+    """
+    Sequence numbers of the commits that rewrote rows instead of adding events:
+    compaction's redaction and file merges. Their files hold events already folded.
+    """
+    return {
+        snapshot["sequence-number"]
+        for snapshot in metadata.get("snapshots", [])
+        if snapshot.get("summary", {}).get("operation") != "append"
+    }
+
+
+def new_files_by_sequence(
+    files: list[tuple[str, str, int]], after: int, rewrites: set[int] = frozenset()
+) -> list[tuple[int, list[str]]]:
     """
     Group the data files added after sequence number `after` by the commit that
-    added them, oldest first.
+    added them, oldest first, leaving out commits that only rewrote rows.
 
-    The store is append-only, so its files are read directly. A delete file
-    would mean rows were removed, which reading the files alone would miss, so
-    it stops the run instead.
+    Only data files are read, directly. New events only ever arrive as appends.
+    Compaction redacts and merges files in other commits, and leaves position
+    delete files behind; neither adds an event, so both are skipped. Equality
+    deletes would remove rows in a way reading files directly can't follow;
+    nothing writes them, so they stop the run.
     """
-    if any(content != "DATA" for content, _, _ in files):
-        raise ValueError("The event store has delete files; it should only ever be appended to")
-    new = sorted((sequence, path) for _, path, sequence in files if sequence > after)
+    if any(content == "EQUALITY_DELETES" for content, _, _ in files):
+        raise ValueError("The event store has equality delete files, which this job can't follow")
+    new = sorted(
+        (sequence, path)
+        for content, path, sequence in files
+        if content == "DATA" and sequence > after and sequence not in rewrites
+    )
     return [(sequence, [path for _, path in group]) for sequence, group in groupby(new, key=lambda f: f[0])]
 
 
@@ -233,8 +265,12 @@ def fold_files(con: duckdb.DuckDBPyConnection, schema: str, files: list[str], fr
         con.execute(f"INSERT INTO {schema}.records SELECT * FROM new_versions ORDER BY collection, did, rkey")
     if deletes:
         con.execute(f"INSERT INTO {schema}.record_deletes SELECT * FROM new_deletes ORDER BY collection, did, rkey")
+    # The oldest delete folded shows how long a deleted record could stay visible.
     con.execute(
-        f"INSERT INTO {schema}.projection_runs VALUES (now(), ?, ?, ?, ?, ?, ?)",
+        f"""
+        INSERT INTO {schema}.projection_runs
+        SELECT now(), ?, ?, ?, ?, ?, ?, (SELECT min(event_time) FROM new_deletes)
+        """,
         [from_sequence, to_sequence, len(files), events, versions, deletes],
     )
     for name in ("new_events", "new_versions", "new_deletes"):
@@ -242,11 +278,13 @@ def fold_files(con: duckdb.DuckDBPyConnection, schema: str, files: list[str], fr
     return RunResult(to_sequence, len(files), events, versions, deletes, time.monotonic() - started)
 
 
-def project_all(con: duckdb.DuckDBPyConnection, schema: str, events_table: str) -> list[RunResult]:
+def project_all(
+    con: duckdb.DuckDBPyConnection, schema: str, events_table: str, rewrites: set[int] = frozenset()
+) -> list[RunResult]:
     """Fold every store commit added since the last run, one commit at a time, oldest first."""
     after = last_sequence(con, schema)
     results = []
-    for sequence, files in new_files_by_sequence(store_files(con, events_table), after):
+    for sequence, files in new_files_by_sequence(store_files(con, events_table), after, rewrites):
         result = fold_files(con, schema, files, after, sequence)
         log.info(
             "Folded store commit %d (%d files) in %.0fs: %s events, %s versions, %s deletes",
@@ -284,6 +322,6 @@ def main() -> None:
         events_table = attach_glue(con, args.region)
         schema = events_table.rsplit(".", 1)[0]
         create_tables(con, schema, args.warehouse)
-        project_all(con, schema, events_table)
+        project_all(con, schema, events_table, rewrite_sequences(store_metadata(args.region)))
     finally:
         con.close()

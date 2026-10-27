@@ -1,0 +1,19 @@
+[Unit]
+Description=Expire old snapshots and delete unused files, so compacted-away data leaves S3
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+User=bluesky
+Group=bluesky
+WorkingDirectory=/var/lib/bluesky
+EnvironmentFile=/etc/bluesky/process.env
+ExecStart=/usr/bin/flock /var/lib/bluesky/lake.lock /opt/bluesky-stream-analytics/.venv/bin/compact --vacuum --warehouse s3://${BUCKET}/warehouse
+Environment=PYTHONUNBUFFERED=1
+Nice=10
+StateDirectory=bluesky
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=read-only

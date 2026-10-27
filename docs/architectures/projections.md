@@ -15,9 +15,9 @@ Goals:
 
 Non-goals:
 
-- Physically removing deleted rows every hour. That's a daily compaction, the next step.
+- Physically removing deleted rows every hour. That's nightly [compaction](compaction.md), which also sets the deadline by which deleted data leaves S3.
 - Record content. Like the store, there's no post text, only reply links and languages.
-- Removing the records of deleted accounts. That needs a pass over every record of an account, so it'll be part of the daily compaction too.
+- Removing the records of deleted accounts. That needs a pass over every record of an account; it's a later step.
 
 ## Design
 
@@ -49,7 +49,7 @@ flowchart LR
     V --> EV
 ```
 
-1. **Find what's new.** Every commit to the event store gets the next sequence number in Iceberg's metadata, and every data file records the one it was added in. `project` asks the metadata for the store's files, keeps those with a sequence number above the last one in `projection_runs`, and groups them by commit, oldest first. The store is only ever appended to; a delete file in it would mean rows were removed, so it stops the run instead of reading wrong data.
+1. **Find what's new.** Every commit to the event store gets the next sequence number in Iceberg's metadata, and every data file records the one it was added in. `project` asks the metadata for the store's files, keeps those with a sequence number above the last one in `projection_runs`, and groups them by commit, oldest first. Events only ever arrive as appends. Compaction also commits to the store when it redacts deleted records and rewrites files, but those commits add no events, so `project` reads the store's metadata through Glue and skips every commit that isn't an append ([D-034](../decisions/engineering-decisions.md#d-034-deleted-records-are-redacted-in-the-event-store)).
 2. **Read only those files.** One commit's files at a time, and only the columns the fold needs, straight from S3. Only commits of the five record types below are kept.
 3. **Fold.** Creates and edits become rows for `records`. Deletes become markers for `record_deletes`: the account, record type, key, `rev` and time, nothing else.
 4. **Append.** `records` first, then `record_deletes`, then one row in `projection_runs` saying which commit it reached. Nothing already in the tables is read or changed.
@@ -76,7 +76,7 @@ Keeping a marker rather than removing the row is what makes the second line work
 
 All three are Iceberg v2 tables in `bluesky_store`.
 
-**`records`**: one row per version of a record, partitioned by record type and the month the record was created.
+**`records`**: one row per version of a record, partitioned by record type and the day the record was created. Day partitions let compaction rewrite only the last few days, where most deletes land ([D-033](../decisions/engineering-decisions.md#d-033-compaction-is-tiered-by-record-type-and-age-to-fit-the-budget)).
 
 | Column | What it holds |
 |---|---|
@@ -90,7 +90,7 @@ All three are Iceberg v2 tables in `bluesky_store`.
 
 **`record_deletes`**: one row per delete, partitioned by record type and the month of the delete. Each run only writes to the current month however old the deleted records are, so deletes don't scatter small files across old partitions.
 
-**`projection_runs`**: one row per folded commit: when, the sequence numbers from and to, files read, events folded, versions and markers added.
+**`projection_runs`**: one row per folded commit: when, the sequence numbers from and to, files read, events folded, versions and markers added, and the time of the oldest delete folded. The gap between that and the run is the longest a deleted record stayed visible.
 
 **Views**, created in Athena from `sql/views/`:
 
@@ -107,7 +107,7 @@ All three are Iceberg v2 tables in `bluesky_store`.
 
 These record types use TIDs as keys: 13 characters of 5 bits each, in a sortable base32 alphabet, holding a 64-bit number made of a 0 bit, 53 bits of microseconds since 1970 and 10 bits of clock id. The last 2 characters are exactly the clock id, so decoding the first 11 gives the creation time to the microsecond, in SQL, with no lookup.
 
-That's what makes partitioning by creation month possible: even a delete of a like from 2024, whose create was never seen, has a known creation time. A key that isn't a TID, or decodes to before 2022 or to after the event was seen, gets no `record_time` and lands in a partition of its own.
+That's what makes partitioning by creation day possible: even a delete of a like from 2024, whose create was never seen, has a known creation time. A key that isn't a TID, or decodes to before 2022 or to after the event was seen, gets no `record_time` and lands in a partition of its own. On real data that's about 0.02% of records, mostly posts, and nearly all of them are TID-shaped keys that decode to 1970 or to centuries from now, from apps that don't build keys from the clock ([details](../validation/testing.md#the-projections-on-real-data)).
 
 ## Failure handling
 
@@ -115,7 +115,8 @@ That's what makes partitioning by creation month possible: even a delete of a li
 |---|---|
 | The job dies before logging a run | The next run folds that commit again. The duplicate rows don't change any view |
 | The event store load fails | `project` doesn't run that hour (it runs after `process` in the same service). The next run catches up on every commit since |
-| A delete file appears in the event store | The run stops with an error rather than reading files that no longer match the table |
+| Compaction redacts or rewrites store files | Those commits aren't appends, so the run skips them; the events in them were folded when they first arrived |
+| An equality delete file appears in the event store | The run stops with an error. Nothing writes them, and reading files directly can't follow them |
 | The tables are lost or need a fix | Drop them and run `project`: with no runs logged, it folds every commit from the first |
 
 ## Cost

@@ -5,13 +5,12 @@ from pathlib import Path
 
 import pytest
 
-from sample_events import account, delete, edit_post, follow, identity, like, post, time_us, write_hour_file
+from sample_events import account, delete, edit_post, follow, identity, like, post, tid, time_us, write_hour_file
 
 from bluesky_stream_analytics import projections
 from bluesky_stream_analytics.event_store import COLUMNS, stage_batch
 from bluesky_stream_analytics.process import connect
 from bluesky_stream_analytics.projections import (
-    TID_ALPHABET,
     create_tables,
     fold_files,
     last_sequence,
@@ -23,12 +22,6 @@ SCHEMA = "bluesky_store"
 VIEWS = Path(__file__).parents[1] / "sql" / "views"
 LIKE = "app.bsky.feed.like"
 POST = "app.bsky.feed.post"
-
-
-def tid(when: datetime, clock: int = 0) -> str:
-    """Encode a time as a TID record key: microseconds shifted past a 10-bit clock id, base32-sortable."""
-    n = (int(when.timestamp() * 1_000_000) << 10) | clock
-    return "".join(TID_ALPHABET[(n >> (5 * i)) & 31] for i in reversed(range(13)))
 
 
 LIKED_AT = datetime(2026, 10, 24, 10, 0, 0, 123456, tzinfo=UTC)
@@ -105,9 +98,26 @@ def test_new_files_are_grouped_by_commit_and_only_after_the_last_run():
     assert new_files_by_sequence(files, 3) == []
 
 
-def test_a_delete_file_in_the_store_stops_the_run():
-    with pytest.raises(ValueError, match="delete files"):
-        new_files_by_sequence([("DATA", "a", 1), ("POSITION_DELETES", "x", 2)], 0)
+def test_commits_that_only_rewrite_rows_are_skipped():
+    metadata = {
+        "snapshots": [
+            {"sequence-number": 1, "summary": {"operation": "append"}},
+            {"sequence-number": 2, "summary": {"operation": "overwrite"}},
+            {"sequence-number": 3, "summary": {"operation": "replace"}},
+            {"sequence-number": 4, "summary": {"operation": "append"}},
+        ]
+    }
+    files = [("DATA", "a", 1), ("DATA", "redacted", 2), ("DATA", "merged", 3), ("DATA", "d", 4)]
+
+    assert projections.rewrite_sequences(metadata) == {2, 3}
+    assert new_files_by_sequence(files, 0, {2, 3}) == [(1, ["a"]), (4, ["d"])]
+
+
+def test_position_deletes_from_redaction_are_skipped_but_equality_deletes_stop_the_run():
+    files = [("DATA", "a", 1), ("POSITION_DELETES", "x", 2), ("DATA", "b", 2)]
+    assert new_files_by_sequence(files, 0) == [(1, ["a"]), (2, ["b"])]
+    with pytest.raises(ValueError, match="equality delete files"):
+        new_files_by_sequence([("DATA", "a", 1), ("EQUALITY_DELETES", "x", 2)], 0)
 
 
 def test_creates_become_current_records(con, store):
@@ -211,8 +221,10 @@ def test_project_all_folds_only_new_commits_and_logs_each(con, store, monkeypatc
     assert third == []
     assert last_sequence(con, SCHEMA) == 3
     assert current(con) == [("did:a", LIKE, K2)]
-    runs = con.execute(f"SELECT from_sequence, to_sequence, files, events_folded FROM {SCHEMA}.projection_runs").fetchall()
-    assert runs == [(0, 1, 1, 1), (1, 2, 1, 1), (2, 3, 1, 1)]
+    runs = con.execute(
+        f"SELECT from_sequence, to_sequence, files, events_folded, epoch_us(oldest_delete_time) FROM {SCHEMA}.projection_runs"
+    ).fetchall()
+    assert runs == [(0, 1, 1, 1, None), (1, 2, 1, 1, None), (2, 3, 1, 1, time_us(11))]
 
 
 def test_accounts_view_has_the_latest_handle_and_status(con, store):
