@@ -2,7 +2,7 @@
 
 ## Purpose
 
-The raw files keep every event exactly as Jetstream sent it, duplicates included, as JSON that has to be parsed on every query. The event store is the same log made usable: an Iceberg table in S3 with one row per distinct event and typed columns. It's append-only. A row is never updated or removed by normal processing, because an event that happened stays something that happened.
+The raw files keep every event exactly as Jetstream sent it, duplicates included, as JSON that has to be parsed on every query. The event store is the same log made usable: an Iceberg table in S3 with one row per distinct event and typed columns. It's append-only. A row is never removed, because an event that happened stays something that happened. The one exception to never changing a row is privacy: once a record is deleted, nightly [compaction](compaction.md) blanks what it pointed at in the events that created it ([D-034](../decisions/engineering-decisions.md#d-034-deleted-records-are-redacted-in-the-event-store)).
 
 Everything downstream reads the event store, not the raw files. The [projections](projections.md) (current posts, likes, follows, accounts) are built by replaying it, and so will the marts be, as described in the [end-to-end pipeline](end-to-end-pipeline.md#architecture).
 

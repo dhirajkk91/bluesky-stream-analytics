@@ -79,6 +79,55 @@ data "aws_iam_policy_document" "processor" {
   }
 }
 
+# Compaction runs its SQL in Athena: the queries, and the results Athena writes.
+data "aws_iam_policy_document" "processor_athena" {
+  statement {
+    sid = "RunCompactionQueries"
+    actions = [
+      "athena:StartQueryExecution",
+      "athena:GetQueryExecution",
+      "athena:GetQueryResults",
+      "athena:StopQueryExecution",
+      "athena:GetWorkGroup",
+    ]
+    resources = [aws_athena_workgroup.bluesky.arn]
+  }
+
+  statement {
+    sid       = "FindResultsBucket"
+    actions   = ["s3:GetBucketLocation"]
+    resources = [aws_s3_bucket.raw.arn]
+  }
+
+  statement {
+    sid       = "ListQueryResults"
+    actions   = ["s3:ListBucket"]
+    resources = [aws_s3_bucket.raw.arn]
+
+    condition {
+      test     = "StringLike"
+      variable = "s3:prefix"
+      values   = ["athena-results/*"]
+    }
+  }
+
+  statement {
+    sid = "WriteQueryResults"
+    actions = [
+      "s3:GetObject",
+      "s3:PutObject",
+      "s3:AbortMultipartUpload",
+    ]
+    resources = ["${aws_s3_bucket.raw.arn}/athena-results/*"]
+  }
+}
+
+resource "aws_iam_user_policy" "processor_athena" {
+  name   = "run-compaction-in-athena"
+  user   = aws_iam_user.processor.name
+  policy = data.aws_iam_policy_document.processor_athena.json
+}
+
 resource "aws_iam_user_policy" "processor" {
   name   = "manage-lake-tables"
   user   = aws_iam_user.processor.name

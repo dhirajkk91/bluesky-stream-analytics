@@ -18,6 +18,7 @@ flowchart LR
             C["bluesky-collect.service"]
             U["bluesky-upload.timer<br/>→ bluesky-upload.service"]
             P["bluesky-process.timer<br/>→ bluesky-process.service"]
+            K["bluesky-compact.timer, bluesky-vacuum.timer<br/>→ compact"]
             D["/var/lib/bluesky"]
             E["/etc/bluesky/*.env<br/>root only"]
         end
@@ -25,8 +26,9 @@ flowchart LR
 
     subgraph AWS["AWS, us-east-1"]
         S3[("S3 bucket<br/>bluesky-stream-analytics-raw-&lt;account&gt;")]
-        IAM["IAM users<br/>uploader: PutObject on raw/*<br/>processor: warehouse/ and lake tables"]
+        IAM["IAM users<br/>uploader: PutObject on raw/*<br/>processor: warehouse/, lake tables,<br/>Athena queries"]
         GL["Glue databases<br/>bluesky, bluesky_store"]
+        AT["Athena workgroup"]
         B["Budget<br/>$10/month"]
     end
 
@@ -39,6 +41,9 @@ flowchart LR
     P -->|"uploaded/"| D
     P -->|"HTTPS"| S3
     P -->|"commit"| GL
+    E -.->|"keys, via systemd"| K
+    K -->|"SQL"| AT
+    AT -->|"rewrites tables"| S3
     IAM -.-> U
     IAM -.-> P
     TF -.->|creates| S3
@@ -72,9 +77,13 @@ flowchart LR
 | `bluesky-upload.timer` | Starts `bluesky-upload.service` at :00, :10, :20 … every hour |
 | `bluesky-upload.service` | Runs `upload` once. systemd reads the key file as root and passes the values in as environment variables |
 | `bluesky-process.timer` | Starts `bluesky-process.service` at 20 past every hour |
+| `bluesky-compact.timer` | Starts `bluesky-compact.service` at 03:45 UTC every night |
+| `bluesky-compact.service` | Runs `compact`, which sends the night's compaction to Athena and waits for it |
+| `bluesky-vacuum.timer` | Starts `bluesky-vacuum.service` at 05:45 UTC every night |
+| `bluesky-vacuum.service` | Runs `compact --vacuum`, which expires old snapshots and deletes unused files |
 | `bluesky-process.service` | Runs the event store job once, then the projections job. DuckDB is held to 2 threads and 3 GB, the service runs at a lower CPU priority than the collector, and systemd caps it at 4 GB of memory |
 
-All three run as an unprivileged `bluesky` user. systemd keeps the rest of the filesystem read-only to them, so the only place they can write is `/var/lib/bluesky`. Logs go to the systemd journal.
+All of them run as an unprivileged `bluesky` user, and the jobs that write to the lake tables take the same lock first (`flock /var/lib/bluesky/lake.lock`), so only one commits at a time ([D-035](../decisions/engineering-decisions.md#d-035-one-writer-at-a-time)). systemd keeps the rest of the filesystem read-only to them, so the only place they can write is `/var/lib/bluesky`. Logs go to the systemd journal.
 
 A1 capacity is only needed to start an instance, so the server is rebooted, never stopped. A stopped instance can only start again if the region has free capacity.
 
@@ -84,7 +93,7 @@ A1 capacity is only needed to start an instance, so the server is rebooted, neve
 |---|---|
 | S3 bucket `bluesky-stream-analytics-raw-<account id>` | `us-east-1`, private, public access blocked, encrypted, HTTPS only, incomplete uploads cleaned up after 1 day. Raw files under `raw/` expire after 14 days; Iceberg tables live under `warehouse/` |
 | IAM user `bluesky-stream-analytics-uploader` | Only `s3:PutObject` under `raw/`. Its access key is created outside Terraform, so the secret never lands in the state file |
-| IAM user `bluesky-stream-analytics-processor` | Reads, writes and deletes under `warehouse/`, reads (never changes) `raw/`, and creates and updates tables in `bluesky_store` only. It can also read the Glue catalog and list database names, which Glue's Iceberg REST endpoint needs. Key created outside Terraform too |
+| IAM user `bluesky-stream-analytics-processor` | Reads, writes and deletes under `warehouse/`, reads (never changes) `raw/`, and creates and updates tables in `bluesky_store` only. It can also read the Glue catalog and list database names, which Glue's Iceberg REST endpoint needs. For compaction, it can run queries in the project's Athena workgroup and write their results under `athena-results/`. Key created outside Terraform too |
 | Glue database `bluesky_store` | The event store's Iceberg table, located at `warehouse/bluesky_store/` |
 | Glue database `bluesky`, table `raw_events` | External table over `raw/events/`, partitions projected from the path. See [query layer](query-layer.md) |
 | Athena workgroup `bluesky-stream-analytics` | 10 GB scan limit per query, results in `athena-results/` (expire after 7 days), settings enforced |

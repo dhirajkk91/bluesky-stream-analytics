@@ -16,7 +16,8 @@
 | Uploader request shape | Against botocore's own S3 model, so a wrong parameter name or a mishandled `412` fails the test |
 | Event parsing | Real-shaped likes, reposts, follows, posts, deletes, identity and account events become the right columns, with the parsing SQL the job runs. A like's target splits into account, record type and key, post text never comes through, unreadable lines are dropped, `event_time` is UTC to the microsecond, and only true repeats are removed |
 | Event store load, end to end | The job's own SQL against a table in a local DuckDB database: loads files and deletes them, loading the same events again adds nothing, a restart's rewind into the next hour's file is matched against the earlier hour, batches load oldest first. The Glue and Iceberg side is covered by the check below and by the real loads |
-| Projections | Creates become current records with the creation time decoded from the key. A delete hides its record and keeps only the key, `rev` and time. A delete folded before its create still wins, folding the same commit three times changes nothing, an edit replaces the post in either order, a key reused after a delete is current again, and a delete of a record never seen is only a marker. Other record types and account events aren't projected. Only commits after the last run are folded, and each run is logged. The accounts view picks the latest handle and status |
+| Projections | Creates become current records with the creation time decoded from the key. A delete hides its record and keeps only the key, `rev` and time. A delete folded before its create still wins, folding the same commit three times changes nothing, an edit replaces the post in either order, a key reused after a delete is current again, and a delete of a record never seen is only a marker. Other record types and account events aren't projected. Only commits after the last run are folded, commits that only rewrote rows are skipped, and each run is logged with its oldest delete. The accounts view picks the latest handle and status |
+| Compaction | Run as SQL against local tables: removes rows with a newer delete or version within reach, and nothing current; redacts the store events of deleted records only, keeping every event; leaves records out of the tier's reach alone until a wider tier; running again changes nothing. Which tier runs on which date and how far each reaches. A failed step stops the run and is logged, and every step is logged in one statement |
 | Backfill download | Only finished files under the requested day or hour, across pages of results, and nothing already waiting locally is downloaded again |
 
 ## Kill test
@@ -279,3 +280,73 @@ The collector during each run:
 - **The sync thread helped.** The collector kept reading at its normal rate throughout and the connection stayed up.
 - **It wasn't the whole story.** The main loop still stopped for up to 5 seconds at a time, because the writes themselves were still on it, and when the disk is overloaded Linux makes writes wait too. That's why reading and writing were then split onto separate threads ([D-028](../decisions/engineering-decisions.md#d-028-read-and-write-on-separate-threads)).
 - **With them split, the disk no longer reaches the connection.** The disk was just as slow, with one sync taking 45 seconds, but the longest the main loop paused in any minute was 0.05 seconds, and the newest event received was never more than 0.1 seconds behind live. The delay showed up where it should: the queue grew to 20,753 events during the 45-second sync, about what 45 seconds of events adds up to, and emptied again within a minute. Back to normal after the job, the queue stays at around 100 to 300 events.
+
+## The projections on real data
+
+The first run of `project` folded everything the event store held, one store commit at a time:
+
+| | |
+|---|---|
+| Store commits | 28, in 49 files |
+| Events folded | 66,291,600 commits of the five projected record types |
+| Appended | 63,930,039 record versions and 2,361,561 delete markers |
+| Time | about 10 minutes |
+
+The next hourly run folded its one new commit in 14 seconds, right after the event store load.
+
+The saved `projections-vs-store` query then recounted, straight from the event store and with separate SQL, how many records should exist now, and compared that with the `current_records` view:
+
+| Record type | Current records | Difference | Deletes of records never seen | No creation time |
+|---|---|---|---|---|
+| Likes | 45,746,017 | 0 | 408,684 | 84 |
+| Reposts | 7,378,265 | 0 | 173,360 | 339 |
+| Posts | 6,812,274 | 0 | 241,571 | 15,020 |
+| Follows | 4,138,162 | 0 | 707,802 | 47 |
+| Blocks | 638,973 | 0 | 7,291 | 0 |
+
+- **Every type matches**, 64.7 million records in all.
+- **Most deletes are of records created before collection started**: about 1.54 million, around 65% of all deletes so far. Follows show it most, 708 thousand unfollows against 4.1 million current follows, since follows are long-lived. Those deletes are the reason for markers ([D-031](../decisions/engineering-decisions.md#d-031-the-highest-rev-wins-and-deletes-leave-a-marker)): without one, a replayed create could bring the record back.
+- **Records with no creation time are almost all valid TIDs with impossible times.** 15,485 of the 15,490 have TID-shaped keys, but decode to the first seconds of 1970 or to centuries from now (2174 to 2540 in the examples checked). So some apps create keys from a counter or random bits rather than the clock. The other 5 aren't TIDs at all. My first guess, posts imported from other sites with their original dates, was wrong: those would decode to real past dates.
+
+## Compaction measured by hand
+
+Before automating compaction, a throwaway script ran each step once in Athena against the real tables and recorded its time and bytes scanned: remove every row with a newer delete or version, `OPTIMIZE` the files, `VACUUM` old snapshots. It ran twice, about an hour and a half apart.
+
+**First run.** `records` went from 65,585,286 rows to 64,713,691: 871,595 superseded rows removed, leaving exactly the number of current records the check had counted.
+
+**Second run**, with two hours of new data since:
+
+| | Before | After |
+|---|---|---|
+| `records` | 132 files, 68,065,291 rows | 78 files, 68,019,989 rows |
+| `record_deletes` | 155 files | 5 files |
+| `events` | 52 files, about 44 MB each | unchanged |
+| Rows hidden by a newer delete | 45,132 | 0 |
+| Older versions | 186 | 0 |
+
+`records` ended with exactly one row per current record, and `projections-vs-store` still matched for every record type.
+
+| Step | Time | Scanned |
+|---|---|---|
+| Remove rows hidden by a newer delete | 11 s | 2,662 MB |
+| Remove older versions | 11 s | 3,653 MB |
+| `OPTIMIZE` records | 135 s | 2,622 MB |
+| `OPTIMIZE` record_deletes | 11 s | 62 MB |
+| `VACUUM`, each table | 6 to 11 s | 0 |
+
+The removals read the whole table even with only two hours of changes, about 9 GB for a 2.6 GB table. That's what made compaction tiered ([D-033](../decisions/engineering-decisions.md#d-033-compaction-is-tiered-by-record-type-and-age-to-fit-the-budget)).
+
+**A false alarm worth keeping.** Looking only at the second run, the numbers didn't add up: the store held the creates of 912,696 records that were later deleted, but `records` had held only 45,132 of them. It looked as if DuckDB had lost rows on the way in. Iceberg's own history of the table (`records$snapshots`) settled it in one query: every append had added exactly the rows its log line reported, and the missing rows had been removed by the first run, which I'd lost track of. The lesson: check a table's commit history before suspecting the writer.
+
+**How old records are when they're deleted.** Every delete marker carries the record's creation time decoded from its key, so this covers all 2,512,516 deletes so far, including those of records created before collection began:
+
+| Age at delete | Deletes | Share |
+|---|---|---|
+| under a day | 919,187 | 36.6% |
+| 1 to 7 days | 395,239 | 15.7% |
+| 7 to 31 days | 265,647 | 10.6% |
+| older | 932,381 | 37.1% |
+| unknown (no creation time) | 62 | 0.0% |
+
+**Redaction, counted but not run:** the event store held 912,770 creates and edits of records that were later deleted, the rows redaction would blank.
+

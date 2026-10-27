@@ -1,0 +1,9 @@
+[Unit]
+Description=Vacuum the lake tables two hours after compaction, once its snapshots are past the one-hour retention
+
+[Timer]
+OnCalendar=*-*-* 05:45:00 UTC
+Persistent=true
+
+[Install]
+WantedBy=timers.target

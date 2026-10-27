@@ -41,16 +41,19 @@ The event store is done: an hourly job on the same server appends each finished 
 
 I built the job in Spark first, then ran the same work through DuckDB on a real hour: identical output, 11 seconds instead of 82. So it runs on DuckDB now, and each hour loads in 10 to 16 seconds. [The decision log](docs/decisions/engineering-decisions.md#d-025-duckdb-for-the-hourly-job) has the numbers. Measuring the table's columns also showed one unused hash was 42% of its size, so that's gone too, and the table went from 77 bytes an event to 31.
 
+The projections are up too: what exists right now, with deletes applied, so 64.7 million current likes, posts, reposts, follows and blocks. Every hour, right after the event store load, a job reads only the new commits and appends new versions and delete markers, in about 15 seconds. A view picks each record's latest version, so folding the same events twice or out of order gives the same answer. A recount straight from the event store matched for every record type, to the record. It also showed that about two thirds of deletes are of things created before I started collecting, which is why a delete leaves a marker instead of just removing a row. [How it works](docs/architectures/projections.md).
+
 ## The plan
 
 1. ~~Connect to the feed and watch events come in~~ 
 2. ~~Save every event without losing anything if it crashes~~ 
 3. ~~Run it 24/7 in the cloud, with files going to S3~~
 4. ~~Make the saved data queryable with SQL~~
-5. Turn the log into proper tables: an event store with each event once (built), then projections of current state with deletes applied (next)
-6. Build the product metrics on top, as a star schema
-7. Add monitoring so I know when something breaks
-8. Put up the public dashboard
+5. ~~Turn the log into proper tables: an event store with each event once, then projections of current state with deletes applied~~
+6. Compact the projections nightly, so deleted records are physically gone by a stated deadline (built, being measured)
+7. Build the product metrics on top, as a star schema
+8. Add monitoring so I know when something breaks
+9. Put up the public dashboard
 
 This will probably change as I learn more.
 
@@ -58,7 +61,7 @@ This will probably change as I learn more.
 
 - Only public data, and I never interact with anyone on the network.
 - Nothing about individual people gets published, only totals.
-- If someone deletes something, I delete it too.
+- If someone deletes something, I delete it too. It's hidden from everything within about 2 hours, and physically gone within 2 days if it was deleted soon after being made, and within 8 days (posts) or 32 days (likes, follows, blocks) whatever its age. [Why it's tiered](docs/architectures/compaction.md#why-its-tiered).
 - Costs stay tiny: free tiers and a small budget.
 
 ## Running it
@@ -77,6 +80,7 @@ uv run process --catalog local --database events.duckdb      # append data/uploa
 uv run process --warehouse s3://<bucket>/warehouse           # the same, into the Iceberg table in Glue
 uv run fetch-raw --bucket <bucket> --date 2026-10-24         # download a day of raw files to load again
 uv run project --warehouse s3://<bucket>/warehouse           # fold new event-store commits into the projections
+uv run compact --warehouse s3://<bucket>/warehouse           # tonight's compaction and redaction, in Athena
 uv run --group bench python benchmarks/compare_engines.py <raw files>   # Spark against DuckDB, needs Java 17 or 21
 ```
 

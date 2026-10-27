@@ -8,6 +8,7 @@ The pipeline turns Bluesky's public Jetstream feed into an event log collected n
 - [Uploader](uploader.md): moving finished files to S3
 - [Event store](event-store.md): the hourly DuckDB job that keeps every event exactly once
 - [Projections](projections.md): current posts, likes, reposts, follows and blocks, with deletes applied
+- [Compaction](compaction.md): the nightly Athena job that physically removes deleted records, and the deletion policy
 - [Query layer](query-layer.md): SQL on the raw files and the event store with Athena
 - [Infrastructure](infrastructure.md): the Oracle server and the AWS resources
 
@@ -77,7 +78,8 @@ flowchart LR
 3. **Upload.** Every 10 minutes `upload` sends each finished file to S3 under the same path, with a checksum S3 verifies. Only after S3 confirms does it move the local copy to `uploaded/` for processing.
 4. **Process.** Every hour `process` loads the waiting files with DuckDB, removes duplicates, and appends the events the event store doesn't have yet. Then it deletes the local copies.
 5. **Project.** Right after, `project` reads the store commits added since its last run and appends new record versions and delete markers to the projections.
-6. **Query.** Athena reads the raw files in place for checks, and the event store and the projections' views for everything else.
+6. **Compact.** Every night `compact` has Athena redact deleted records in the event store, remove superseded rows from the projections and rewrite small files, reaching further back on Sundays and the 1st of the month. Two hours later, a vacuum deletes the files nothing refers to any more.
+7. **Query.** Athena reads the raw files in place for checks, and the event store and the projections' views for everything else.
 
 There is also `watch`, which prints a live summary of the stream and saves nothing. It's for checking the feed from any machine.
 
@@ -118,6 +120,7 @@ src/bluesky_stream_analytics/
     process.py       hourly job: appends handed-over files to the event store
     event_store.py   the SQL that parses, de-duplicates and appends events
     projections.py   hourly job: folds new store commits into the projections
+    compact.py       nightly job: compaction and redaction, run in Athena
     fetch_raw.py     downloads raw files from S3 for backfills
     fs.py            helper for durable renames
 tests/               unit and end-to-end tests

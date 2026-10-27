@@ -6,6 +6,8 @@ from pathlib import Path
 
 from compression import zstd
 
+TID_ALPHABET = "234567abcdefghijklmnopqrstuvwxyz"
+
 
 def time_us(hour: int, minute: int = 0, second: int = 0, micro: int = 0) -> int:
     return int(datetime(2026, 10, 24, hour, minute, second, tzinfo=UTC).timestamp()) * 1_000_000 + micro
@@ -69,3 +71,13 @@ def write_hour_file(data_dir: Path, hour: int, name: str, lines: list[str], fold
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_bytes(zstd.compress("".join(line + "\n" for line in lines).encode()))
     return path
+
+
+def tid(when: datetime, clock: int = 0) -> str:
+    """Encode a time as a TID record key: microseconds shifted past a 10-bit clock id, base32-sortable."""
+    n = (int(when.timestamp() * 1_000_000) << 10) | clock
+    return "".join(TID_ALPHABET[(n >> (5 * i)) & 31] for i in reversed(range(13)))
+
+
+def at_us(when: datetime) -> int:
+    return int(when.timestamp() * 1_000_000)

@@ -309,3 +309,33 @@ Three changes to the event store's columns, measured from Iceberg's own per-colu
 
 An account's current handle and status come from identity and account events, about 0.1% of the store. A view takes the latest of each by sequence number straight from the store, so there's no table to keep in sync. If it gets slow as the store grows, it becomes a projection like the others. Account history (SCD type 2) will come from the same events in the marts.
 
+## D-033: Compaction is tiered by record type and age, to fit the budget
+
+**Problem:** the projections only append ([D-029](#d-029-projections-are-appended-to-not-updated-in-place)), so deleted records stay in the files, hidden by the views, until something rewrites them. Run by hand on the real tables, a compaction of the whole `records` table read about 9 GB for a 2.6 GB table, about 5 cents. The table grows by about 1 GB a day, so doing that daily would pass $25 a month within three months, against a $10 budget for the whole project.
+
+**What decides the reach:** how old a record is when it's deleted, measured over 2.5 million deletes: 36.6% under a day, 15.7% one to seven days, 10.6% one week to a month, 37.1% older.
+
+**Decision:** `records` is partitioned by the day each record was created, so a run can rewrite only recent days. Compaction runs nightly in Athena at three reaches: the last 3 days on ordinary nights, everything for posts and reposts plus the last 8 days for the rest on Sundays, and everything on the 1st of the month. That gives a stated policy: a deleted record is hidden within 2 hours; physically removed within 2 days if it was deleted within a day of being created; and within 8 days at most for posts and reposts, 32 days at most for likes, follows and blocks. Estimated at about $2 a month at six months of data, logged per step in `compaction_runs` so the estimate gets checked.
+
+**Why posts get the shorter deadline:** they carry more (reply links, languages, who replied to whom), and they're about a tenth of the rows, so a weekly full pass over them is cheap. Likes, follows and blocks are nine tenths of the table and get theirs monthly.
+
+**Why Athena:** it runs inside AWS, so reading the tables costs only its price per byte scanned. The same work from the server would also pay for every byte leaving AWS.
+
+**Rejected:** honoring deletes only within a window after creation, say an hour for likes and a week for posts, and ignoring later ones. It would be the cheapest option, but Bluesky's developer guidelines require a way to delete content a user asks to delete, with no time limit; the project's ground rule says the same; and over a third of deletes are of records more than a month old, so counts like current follows would drift from the truth. Every delete is honored; only how soon the bytes leave S3 varies.
+
+## D-034: Deleted records are redacted in the event store
+
+**Problem:** the event store keeps the event that created every record, including what a like pointed at and which post a reply answered. Removing a deleted like from the projections doesn't remove that.
+
+**Decision:** compaction also blanks the subject, reply links and languages in the store events that created or edited a deleted record, and then rewrites the files so the original values are gone. The events themselves stay: that an account liked something at a given time still counts toward activity metrics. The store is append-only apart from this.
+
+**Making it cheap:** redaction is sourced from `records` before the deleted rows are removed, because those rows hold each version's exact event time. That tells Athena which hour partitions of the store to read and rewrite, instead of scanning the whole store.
+
+**Rejected:** leaving the store as it was, as interaction metadata rather than content. It holds no text, but "if someone deletes something, I delete it too" has no exception for metadata.
+
+**Knock-on:** redaction and file rewrites are commits to the store that add files without adding events. The projections job now reads the store's Iceberg metadata through Glue and folds only files from append commits ([D-030](#d-030-new-store-commits-are-found-by-their-iceberg-sequence-number)).
+
+## D-035: One writer at a time
+
+Compaction (through Athena) and the hourly jobs (through DuckDB) commit to the same Iceberg tables. When two writers commit to a table at once, one of them fails. Both are started from the server, so each wraps its command in `flock` on the same lock file, and whichever comes second waits. Compaction is also timed for 03:45 UTC, well away from the hourly :20, so the wait is rare.
+
