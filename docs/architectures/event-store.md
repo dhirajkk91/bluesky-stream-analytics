@@ -67,7 +67,7 @@ If the job stops running, files wait in `uploaded/`, at about 5 GB a day, until 
 | Column | What it holds |
 |---|---|
 | `did` | The account the event belongs to |
-| `event_time` | Jetstream's timestamp, in UTC, to the microsecond |
+| `event_time` | Jetstream's timestamp, in UTC, to the microsecond. It's when Jetstream processed the event, which is almost always within a second of when it happened, but can be minutes later while Jetstream catches up after a stall ([incident](../validation/incidents.md#jetstream-went-quiet-for-15-minutes-27-october)) |
 | `kind` | `commit`, `identity` or `account` |
 | `collection`, `operation`, `rkey`, `rev` | For commits: record type, create/update/delete, record key, repo revision |
 | `seq` | For identity and account events: their sequence number |

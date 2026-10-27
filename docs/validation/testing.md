@@ -17,6 +17,7 @@
 | Event parsing | Real-shaped likes, reposts, follows, posts, deletes, identity and account events become the right columns, with the parsing SQL the job runs. A like's target splits into account, record type and key, post text never comes through, unreadable lines are dropped, `event_time` is UTC to the microsecond, and only true repeats are removed |
 | Event store load, end to end | The job's own SQL against a table in a local DuckDB database: loads files and deletes them, loading the same events again adds nothing, a restart's rewind into the next hour's file is matched against the earlier hour, batches load oldest first. The Glue and Iceberg side is covered by the check below and by the real loads |
 | Projections | Creates become current records with the creation time decoded from the key. A delete hides its record and keeps only the key, `rev` and time. A delete folded before its create still wins, folding the same commit three times changes nothing, an edit replaces the post in either order, a key reused after a delete is current again, and a delete of a record never seen is only a marker. Other record types and account events aren't projected. Only commits after the last run are folded, commits that only rewrote rows are skipped, and each run is logged with its oldest delete. The accounts view picks the latest handle and status |
+| Marts | `dbt build` on DuckDB over a few hand-made days of four accounts: daily, weekly and monthly active, new accounts, volumes, engagement received without self-engagement, top 1% share and Gini, retention only for days that have happened, a new account version for each handle and status change. An incremental build redoes the recent days with late events and adds the new day, without duplicates. Every dbt test in the project runs too |
 | Compaction | Run as SQL against local tables: removes rows with a newer delete or version within reach, and nothing current; redacts the store events of deleted records only, keeping every event; leaves records out of the tier's reach alone until a wider tier; running again changes nothing. Which tier runs on which date and how far each reaches. A failed step stops the run and is logged, and every step is logged in one statement |
 | Backfill download | Only finished files under the requested day or hour, across pages of results, and nothing already waiting locally is downloaded again |
 
@@ -350,3 +351,35 @@ The removals read the whole table even with only two hours of changes, about 9 G
 
 **Redaction, counted but not run:** the event store held 912,770 creates and edits of records that were later deleted, the rows redaction would blank.
 
+## Compaction in production
+
+After the projections were rebuilt with day partitions, the first compaction ran the monthly tier by hand, so it reached everything, including the 912,770 store events of deleted records waiting to be redacted. Then the checks, all in Athena:
+
+| Check | Result |
+|---|---|
+| `projections-vs-store` | 0 difference for every record type |
+| Store events of deleted records with a subject, reply link or languages left | 0 |
+| Rows in `records` hidden by a newer delete | 0 |
+| `store-vs-raw` for 26 October, after redaction | every hour matches the raw files: no event lost or added |
+
+The nightly timers took over from there. The first daily run and the vacuum two hours later ran on their own, and the hourly runs after compaction folded only their own hour: the store commits compaction made were skipped. Cost and time per run are in [compaction](../architectures/compaction.md#cost).
+
+**Time to hide a deleted record**, from `projection_runs` over the first 13 hourly runs: 85 minutes on average, 141 at worst. The worst was an hour that missed its run because Jetstream stalled ([incident](incidents.md#jetstream-went-quiet-for-15-minutes-27-october)).
+
+## New accounts, checked
+
+The feed has no signup event, so the marts treat an account's first profile record as its signup ([D-037](../decisions/engineering-decisions.md#d-037-active-means-wrote-something-and-signups-are-inferred)). Before relying on that, two queries on the event store:
+
+| Day | Active writers | Profiles created | Identity events | Account events |
+|---|---|---|---|---|
+| 25 October | 1,253,076 | 19,200 | 26,989 | 29,271 |
+| 26 October | 1,322,431 | 18,521 | 25,041 | 32,908 |
+
+Of the 18,521 accounts that created a profile on 26 October:
+
+| | Accounts | Share |
+|---|---|---|
+| Had written anything more than an hour before | 29 | 0.2% |
+| Had a handle set (an identity event) within the hour | 18,422 | 99.5% |
+
+A new account gets its handle and its profile at almost the same moment, and an existing account would have shown up writing earlier. So profile creation with nothing earlier is a sound signup signal, at about 18,500 to 19,000 new accounts a day.

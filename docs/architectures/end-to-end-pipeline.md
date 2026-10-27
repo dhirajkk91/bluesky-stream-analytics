@@ -9,6 +9,7 @@ The pipeline turns Bluesky's public Jetstream feed into an event log collected n
 - [Event store](event-store.md): the hourly DuckDB job that keeps every event exactly once
 - [Projections](projections.md): current posts, likes, reposts, follows and blocks, with deletes applied
 - [Compaction](compaction.md): the nightly Athena job that physically removes deleted records, and the deletion policy
+- [Marts](marts.md): the star schema the metrics come from, built with dbt
 - [Query layer](query-layer.md): SQL on the raw files and the event store with Athena
 - [Infrastructure](infrastructure.md): the Oracle server and the AWS resources
 
@@ -36,7 +37,7 @@ flowchart LR
 | Raw event log | Every event exactly as Jetstream sent it, duplicates included | Append only, expires after 14 days | Built |
 | Event store | Each event once, typed, no record content | Append only, never updated | Built |
 | Projections | What exists right now, with deletes applied | New versions and delete markers appended each hour, the latest picked by views | Built |
-| Marts | Kimball star schema: facts like engagement, dimensions like accounts with full history (SCD type 2) | Built from the store and projections | Later |
+| Marts | Kimball star schema: facts like engagement, dimensions like accounts with full history (SCD type 2) | Rebuilt nightly with dbt in Athena, the last two days each time | Accounts built, posts next |
 
 Writes and reads are kept apart in the CQRS sense. The event store is shaped for appending what happened. The projections and marts are read models, each shaped for the questions asked of it, and any of them can be thrown away and rebuilt from the store.
 
@@ -79,7 +80,8 @@ flowchart LR
 4. **Process.** Every hour `process` loads the waiting files with DuckDB, removes duplicates, and appends the events the event store doesn't have yet. Then it deletes the local copies.
 5. **Project.** Right after, `project` reads the store commits added since its last run and appends new record versions and delete markers to the projections.
 6. **Compact.** Every night `compact` has Athena redact deleted records in the event store, remove superseded rows from the projections and rewrite small files, reaching further back on Sundays and the 1st of the month. Two hours later, a vacuum deletes the files nothing refers to any more.
-7. **Query.** Athena reads the raw files in place for checks, and the event store and the projections' views for everything else.
+7. **Build the marts.** Every night `dbt build` turns the event store into facts, dimensions and the daily metrics, and runs their tests.
+8. **Query.** Athena reads the raw files in place for checks, and the event store and the projections' views for everything else.
 
 There is also `watch`, which prints a live summary of the stream and saves nothing. It's for checking the feed from any machine.
 
@@ -123,6 +125,7 @@ src/bluesky_stream_analytics/
     compact.py       nightly job: compaction and redaction, run in Athena
     fetch_raw.py     downloads raw files from S3 for backfills
     fs.py            helper for durable renames
+transform/           the dbt project for the marts
 tests/               unit and end-to-end tests
 infra/aws/           Terraform for the bucket, IAM users, the budget, Glue and Athena
 sql/                 the views and the check queries

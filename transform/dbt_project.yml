@@ -1,0 +1,27 @@
+name: bluesky_marts
+version: "1.0.0"
+config-version: 2
+profile: bluesky
+
+model-paths: ["models"]
+macro-paths: ["macros"]
+test-paths: ["tests"]
+
+vars:
+  # The first day of collection. Full builds start here.
+  collection_start: "2026-10-24"
+  # Incremental builds redo this many days before the end, to pick up events loaded late.
+  lookback_days: 2
+  # The first day not built, as yyyy-mm-dd. Empty means today (UTC), so the
+  # newest day built is yesterday, the last complete one.
+  end_date: ""
+
+models:
+  bluesky_marts:
+    +materialized: table
+    +table_type: iceberg
+    +format: parquet
+    staging:
+      +materialized: view
+    intermediate:
+      +materialized: view

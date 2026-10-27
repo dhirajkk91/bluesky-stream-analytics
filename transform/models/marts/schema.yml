@@ -1,0 +1,73 @@
+version: 2
+
+models:
+  - name: dim_date
+    description: One row per day from the start of collection to the last complete day.
+    columns:
+      - name: date_day
+        data_tests: [unique, not_null]
+
+  - name: dim_account
+    description: >
+      Account history, SCD type 2. One row per version of an account; a new version starts
+      whenever its handle or status changes. Accounts are keyed by a hash of their DID.
+    data_tests:
+      - unique_combination:
+          arguments:
+            columns: [account_key, version]
+    columns:
+      - name: account_key
+        data_tests: [not_null]
+      - name: status
+        data_tests:
+          - accepted_values:
+              config:
+                severity: warn
+              arguments:
+                values: [active, unknown, inactive, deactivated, deleted, suspended, takendown, desynchronized, throttled]
+      - name: valid_from
+        data_tests: [not_null]
+
+  - name: fct_account_activity_daily
+    description: One row per account per day it wrote anything, with counts by kind of write.
+    data_tests:
+      - unique_combination:
+          arguments:
+            columns: [activity_date, account_key]
+    columns:
+      - name: activity_date
+        data_tests:
+          - not_null
+          - relationships:
+              arguments:
+                to: ref('dim_date')
+                field: date_day
+      - name: account_key
+        data_tests: [not_null]
+      - name: writes
+        data_tests: [not_null]
+
+  - name: fct_engagement_received_daily
+    description: One row per account per day it received likes, reposts, replies or follows from another account.
+    data_tests:
+      - unique_combination:
+          arguments:
+            columns: [activity_date, account_key]
+    columns:
+      - name: activity_date
+        data_tests: [not_null]
+      - name: account_key
+        data_tests: [not_null]
+
+  - name: mart_daily_metrics
+    description: One row per day with the headline metrics. See docs/architectures/marts.md for each definition.
+    columns:
+      - name: date_day
+        data_tests: [unique, not_null]
+
+  - name: mart_retention
+    description: Day 1, 7 and 30 retention of each day's new accounts.
+    data_tests:
+      - unique_combination:
+          arguments:
+            columns: [cohort_date, day_n]

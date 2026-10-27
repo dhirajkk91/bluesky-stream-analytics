@@ -1,0 +1,23 @@
+[Unit]
+Description=Build and test the marts with dbt, in Athena
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+User=bluesky
+Group=bluesky
+WorkingDirectory=/var/lib/bluesky
+EnvironmentFile=/etc/bluesky/process.env
+ExecStart=/opt/bluesky-stream-analytics/.venv/bin/dbt build --project-dir /opt/bluesky-stream-analytics/transform --profiles-dir /opt/bluesky-stream-analytics/transform
+# The checkout is read-only to the service, so dbt writes its files here instead.
+Environment=DBT_TARGET_PATH=/var/lib/bluesky/dbt/target
+Environment=DBT_LOG_PATH=/var/lib/bluesky/dbt/logs
+Environment=DBT_SEND_ANONYMOUS_USAGE_STATS=false
+Environment=PYTHONUNBUFFERED=1
+Nice=10
+StateDirectory=bluesky
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=read-only
