@@ -339,3 +339,33 @@ An account's current handle and status come from identity and account events, ab
 
 Compaction (through Athena) and the hourly jobs (through DuckDB) commit to the same Iceberg tables. When two writers commit to a table at once, one of them fails. Both are started from the server, so each wraps its command in `flock` on the same lock file, and whichever comes second waits. Compaction is also timed for 03:45 UTC, well away from the hourly :20, so the wait is rare.
 
+## D-036: dbt Core on Athena for the marts
+
+**Decision:** the marts are dbt models, built in Athena with dbt Core 1.12 and the `dbt-athena` adapter, as Iceberg tables in their own Glue database.
+
+**Why dbt:** the marts are many SQL models depending on each other, with tests. dbt gives the dependency order, incremental builds, tests and documentation, and it's the standard tool for exactly this. Plain SQL files run by a small Python job, like `compact`, would mean rebuilding much of that by hand.
+
+**Why Athena:** for the same reason as compaction ([D-033](#d-033-compaction-is-tiered-by-record-type-and-age-to-fit-the-budget)): it runs inside AWS, so reading the event store costs only Athena's price per byte, with no data leaving AWS.
+
+**Why not dbt v2:** it's now dbt's default, but it doesn't support Athena. dbt Core v1 is still fully supported.
+
+**Testing on two engines:** the same models run on DuckDB in CI, against a hand-made sample with known answers. The handful of functions that differ between Athena's SQL and DuckDB's are macros that pick the right one per engine.
+
+**Incremental builds:** each night clears and rebuilds the last two days, since an hour can reach the event store late. Clearing and appending, rather than a `MERGE`, means a rebuilt day can lose rows as well as change them.
+
+## D-037: Active means wrote something, and signups are inferred
+
+**Active accounts:** an account is active on a day if it wrote to any Bluesky record type. The firehose only carries writes, so accounts that only read can't be counted. Every chart of active accounts says "active writers".
+
+**New accounts:** the feed has no signup event. An account counts as new on the day it creates its profile record, if nothing was seen from it more than an hour before. Profile creation is the clearest sign of a new account, and the one-hour rule stops accounts that existed before collection, and only set a profile now, from counting as new.
+
+**Checked on real data** ([details](../validation/testing.md#new-accounts-checked)): of the 18,521 accounts that created a profile on 26 October, only 29 had written anything more than an hour before, and 18,422 (99.5%) also had an identity event, a handle being set, within the hour. Profile creation does mark new accounts, about 18,500 to 19,000 a day.
+
+**Rejected:** "first seen" as the signup day. Every existing account is first seen sometime after collection starts, so for weeks "new accounts" would mostly be old ones.
+
+## D-038: Accounts are hashed, and handles kept, in private marts
+
+The marts key accounts by a SHA-256 hash of their DID, so raw account IDs don't spread into every table. DIDs are public, so anyone with a list of them could match the hashes: it's pseudonymization, not anonymization, and isn't presented as more.
+
+`dim_account` keeps handles. They're public on Bluesky, and they're what its history tracks (SCD type 2). The marts are never published as tables; only aggregates leave, with small groups suppressed.
+

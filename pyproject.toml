@@ -28,7 +28,15 @@ bench = [
 ]
 dev = [
     "pytest>=9.1.1",
+    "dbt-duckdb>=1.11.1,<1.12",
 ]
+marts = [
+    "dbt-core>=1.12.6,<1.13",
+    "dbt-athena>=1.11.1,<1.12",
+]
+
+[tool.uv]
+default-groups = ["dev", "marts"]
 
 [build-system]
 requires = ["uv_build>=0.12.15,<0.13.0"]

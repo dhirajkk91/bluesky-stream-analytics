@@ -1,0 +1,20 @@
+# Credentials come from the environment, as for every other job on the server.
+bluesky:
+  target: athena
+  outputs:
+    athena:
+      type: athena
+      database: awsdatacatalog
+      schema: bluesky_marts
+      region_name: "{{ env_var('AWS_REGION', 'us-east-1') }}"
+      work_group: bluesky-stream-analytics
+      s3_staging_dir: "s3://{{ env_var('BUCKET', 'unset') }}/athena-results/dbt/"
+      s3_data_dir: "s3://{{ env_var('BUCKET', 'unset') }}/warehouse/"
+      s3_data_naming: schema_table_unique
+      threads: 2
+    ci:
+      type: duckdb
+      path: "{{ env_var('DBT_DUCKDB_PATH', 'target/ci.duckdb') }}"
+      threads: 2
+      settings:
+        TimeZone: UTC

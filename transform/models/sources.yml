@@ -1,0 +1,9 @@
+version: 2
+
+sources:
+  - name: bluesky_store
+    description: The event store and the projections, written by the jobs on the server.
+    schema: bluesky_store
+    tables:
+      - name: events
+        description: Every Jetstream event exactly once. See docs/architectures/event-store.md.

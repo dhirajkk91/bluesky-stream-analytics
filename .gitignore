@@ -9,3 +9,7 @@ infra/**/*.tfstate.*
 infra/**/terraform.tfvars
 *.duckdb
 *.duckdb.wal
+transform/target/
+transform/logs/
+transform/dbt_packages/
+transform/.user.yml

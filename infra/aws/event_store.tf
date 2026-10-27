@@ -79,6 +79,43 @@ data "aws_iam_policy_document" "processor" {
   }
 }
 
+# The marts: tables dbt builds in Athena from the event store.
+resource "aws_glue_catalog_database" "marts" {
+  name         = "bluesky_marts"
+  location_uri = "s3://${aws_s3_bucket.raw.bucket}/${local.warehouse_prefix}/bluesky_marts"
+}
+
+data "aws_iam_policy_document" "processor_marts" {
+  # dbt creates, replaces and drops its own tables and views, and cleans up old
+  # table versions in Glue, only in the marts database.
+  statement {
+    sid = "ManageMartTables"
+    actions = [
+      "glue:GetDatabase",
+      "glue:GetTable",
+      "glue:GetTables",
+      "glue:CreateTable",
+      "glue:UpdateTable",
+      "glue:DeleteTable",
+      "glue:GetPartitions",
+      "glue:GetTableVersions",
+      "glue:DeleteTableVersion",
+      "glue:BatchDeleteTableVersion",
+    ]
+    resources = [
+      "arn:aws:glue:${var.region}:${data.aws_caller_identity.current.account_id}:catalog",
+      "arn:aws:glue:${var.region}:${data.aws_caller_identity.current.account_id}:database/${aws_glue_catalog_database.marts.name}",
+      "arn:aws:glue:${var.region}:${data.aws_caller_identity.current.account_id}:table/${aws_glue_catalog_database.marts.name}/*",
+    ]
+  }
+}
+
+resource "aws_iam_user_policy" "processor_marts" {
+  name   = "build-marts"
+  user   = aws_iam_user.processor.name
+  policy = data.aws_iam_policy_document.processor_marts.json
+}
+
 # Compaction runs its SQL in Athena: the queries, and the results Athena writes.
 data "aws_iam_policy_document" "processor_athena" {
   statement {

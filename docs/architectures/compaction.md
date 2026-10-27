@@ -15,6 +15,8 @@ Compaction cleans these up, and with it, deletes on Bluesky become deletes in th
 | | Posts and reposts | Likes, follows and blocks |
 |---|---|---|
 | Hidden from every view and query | within 2 hours | within 2 hours |
+
+The first half is measured on every hourly run: over the first 13 runs, a deleted record stayed visible for 85 minutes on average. The worst was 141 minutes, when Jetstream stalled for 15 minutes and an hour's file missed its run ([incident](../validation/incidents.md#jetstream-went-quiet-for-15-minutes-27-october)). When Jetstream is down, nothing reaches the projections, deletes included.
 | Physically removed, record deleted within a day of being created | within 2 days | within 2 days |
 | Physically removed, any age | within 8 days | within 32 days |
 
@@ -114,4 +116,12 @@ Compaction and the hourly job commit to the same tables. Two writers committing 
 
 ## Cost
 
-Measured on the first runs and logged in `compaction_runs` from then on. The estimate above is about $2 a month at six months of data.
+Logged in `compaction_runs` for every run. The first ones:
+
+| Run | Reach | Time | Scanned | Cost |
+|---|---|---|---|---|
+| First run, monthly tier | everything | 4 min | 14.7 GB | 7 cents |
+| First nightly run, daily tier | records created since 24 October | 3 min | 16.6 GB | 8 cents |
+| First vacuum | all three tables | under a minute | 0 | under 1 cent |
+
+The daily run cost as much as the full one because the project started collecting on 24 October: three days back was still all of the data. The tiers only start saving once there's history older than their reach, from about 3 November for the daily run. That's when the estimate of about $2 a month gets its first real check, and when we'll see whether Athena really skips the partitions outside a run's reach.

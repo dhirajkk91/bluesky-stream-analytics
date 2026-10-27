@@ -43,6 +43,8 @@ I built the job in Spark first, then ran the same work through DuckDB on a real 
 
 The projections are up too: what exists right now, with deletes applied, so 64.7 million current likes, posts, reposts, follows and blocks. Every hour, right after the event store load, a job reads only the new commits and appends new versions and delete markers, in about 15 seconds. A view picks each record's latest version, so folding the same events twice or out of order gives the same answer. A recount straight from the event store matched for every record type, to the record. It also showed that about two thirds of deletes are of things created before I started collecting, which is why a delete leaves a marker instead of just removing a row. [How it works](docs/architectures/projections.md).
 
+Deletes are now real deletes, on a schedule. Every night a job in Athena blanks what a deleted record pointed at in the event store, removes deleted and outdated rows from the projections, and rewrites the files, and a vacuum two hours later deletes the old files from S3. Doing all of that over everything every night would have passed $25 a month within three months, so I measured how old records are when they're deleted (over a third are under a day old) and tiered it: recent days nightly, everything weekly or monthly depending on the record type. [The deletion policy and why](docs/architectures/compaction.md). There's also an [incidents log](docs/validation/incidents.md), starting with the morning Jetstream went quiet for 15 minutes.
+
 ## The plan
 
 1. ~~Connect to the feed and watch events come in~~ 
@@ -51,7 +53,7 @@ The projections are up too: what exists right now, with deletes applied, so 64.7
 4. ~~Make the saved data queryable with SQL~~
 5. ~~Turn the log into proper tables: an event store with each event once, then projections of current state with deletes applied~~
 6. Compact the projections nightly, so deleted records are physically gone by a stated deadline (built, being measured)
-7. Build the product metrics on top, as a star schema
+7. Build the product metrics on top, as a star schema (accounts built, posts next)
 8. Add monitoring so I know when something breaks
 9. Put up the public dashboard
 
@@ -81,6 +83,7 @@ uv run process --warehouse s3://<bucket>/warehouse           # the same, into th
 uv run fetch-raw --bucket <bucket> --date 2026-10-24         # download a day of raw files to load again
 uv run project --warehouse s3://<bucket>/warehouse           # fold new event-store commits into the projections
 uv run compact --warehouse s3://<bucket>/warehouse           # tonight's compaction and redaction, in Athena
+uv run dbt build --project-dir transform --profiles-dir transform   # build and test the marts in Athena (needs BUCKET)
 uv run --group bench python benchmarks/compare_engines.py <raw files>   # Spark against DuckDB, needs Java 17 or 21
 ```
 
