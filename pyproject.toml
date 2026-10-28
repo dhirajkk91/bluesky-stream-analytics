@@ -21,6 +21,7 @@ process = "bluesky_stream_analytics.process:main"
 fetch-raw = "bluesky_stream_analytics.fetch_raw:main"
 project = "bluesky_stream_analytics.projections:main"
 compact = "bluesky_stream_analytics.compact:main"
+resolve-handles = "bluesky_stream_analytics.handles:main"
 
 [dependency-groups]
 bench = [

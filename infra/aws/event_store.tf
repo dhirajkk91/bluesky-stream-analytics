@@ -110,10 +110,16 @@ data "aws_iam_policy_document" "processor_marts" {
   }
 }
 
-resource "aws_iam_user_policy" "processor_marts" {
-  name   = "build-marts"
-  user   = aws_iam_user.processor.name
+# A managed policy rather than another inline one: IAM caps all of a user's
+# inline policies together at 2,048 characters, and the processor's are full.
+resource "aws_iam_policy" "processor_marts" {
+  name   = "${var.project}-build-marts"
   policy = data.aws_iam_policy_document.processor_marts.json
+}
+
+resource "aws_iam_user_policy_attachment" "processor_marts" {
+  user       = aws_iam_user.processor.name
+  policy_arn = aws_iam_policy.processor_marts.arn
 }
 
 # Compaction runs its SQL in Athena: the queries, and the results Athena writes.

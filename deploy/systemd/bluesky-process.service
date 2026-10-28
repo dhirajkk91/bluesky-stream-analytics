@@ -1,5 +1,5 @@
 [Unit]
-Description=Append uploaded Bluesky event files to the event store, then fold them into the projections
+Description=Append uploaded Bluesky event files to the event store, fold them into the projections, and look up changed handles
 After=network-online.target
 Wants=network-online.target
 
@@ -11,6 +11,7 @@ WorkingDirectory=/var/lib/bluesky
 EnvironmentFile=/etc/bluesky/process.env
 ExecStart=/usr/bin/flock /var/lib/bluesky/lake.lock /opt/bluesky-stream-analytics/.venv/bin/process --warehouse s3://${BUCKET}/warehouse --data-dir /var/lib/bluesky --extension-dir /var/lib/bluesky/duckdb-extensions
 ExecStart=/usr/bin/flock /var/lib/bluesky/lake.lock /opt/bluesky-stream-analytics/.venv/bin/project --warehouse s3://${BUCKET}/warehouse --extension-dir /var/lib/bluesky/duckdb-extensions
+ExecStart=/usr/bin/flock /var/lib/bluesky/lake.lock /opt/bluesky-stream-analytics/.venv/bin/resolve-handles --warehouse s3://${BUCKET}/warehouse --extension-dir /var/lib/bluesky/duckdb-extensions
 Environment=PYTHONUNBUFFERED=1
 Nice=10
 MemoryMax=4G

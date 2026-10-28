@@ -24,9 +24,10 @@ Non-goals:
 ```mermaid
 flowchart LR
     EV[("bluesky_store.events")]
+    AH[("bluesky_store.account_handles")]
     subgraph dbt["dbt, run in Athena at 04:30 UTC"]
         SC["stg_commits<br/>writes, classified"]
-        SA["stg_account_changes<br/>handle and status events"]
+        SA["stg_account_changes<br/>status events and<br/>handle lookups"]
         FA["fct_account_activity_daily<br/>account × day"]
         FE["fct_engagement_received_daily<br/>account × day"]
         IF["int_account_firsts<br/>first seen, signup"]
@@ -37,6 +38,7 @@ flowchart LR
     end
     EV --> SC
     EV --> SA
+    AH --> SA
     SC --> FA
     SC --> FE
     FA --> IF
@@ -80,7 +82,8 @@ The facts and daily metrics are incremental: each night clears and rebuilds the 
 - **New accounts are inferred.** The feed has no "signup" event. An account's first profile record is the clearest sign; requiring that nothing was seen from the account more than an hour earlier rules out accounts that existed before collection and only now set a profile. Checked on a real day, 99.5% of profile creators also had a handle set within the hour, as new accounts do ([details](../validation/testing.md#new-accounts-checked)).
 - **Engagement on deleted records stops counting** once compaction redacts them, but only for the days rebuilt after that. Counts for older days stay as they were built.
 - **Follows only from 24 October on.** There's no follower count, because follows made before collection began are invisible.
-- **Display names aren't tracked.** The event store keeps no record content, so account history follows handles and status only.
+- **Handles come from lookups.** Jetstream's identity events almost never carry the handle, so `resolve-handles` asks Bluesky's API for it whenever an account's identity changes ([handle lookups](handles.md)). Accounts whose identity hasn't changed since collection began have no handle in their history, only status.
+- **Display names aren't tracked.** The event store keeps no record content, and the handle lookups deliberately don't keep it either, so account history follows handles and status only.
 
 ## Privacy
 

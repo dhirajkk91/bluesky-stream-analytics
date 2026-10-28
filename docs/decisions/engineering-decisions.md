@@ -367,5 +367,19 @@ Compaction (through Athena) and the hourly jobs (through DuckDB) commit to the s
 
 The marts key accounts by a SHA-256 hash of their DID, so raw account IDs don't spread into every table. DIDs are public, so anyone with a list of them could match the hashes: it's pseudonymization, not anonymization, and isn't presented as more.
 
-`dim_account` keeps handles. They're public on Bluesky, and they're what its history tracks (SCD type 2). The marts are never published as tables; only aggregates leave, with small groups suppressed.
+`dim_account` keeps handles. They're public on Bluesky, and they're what its history tracks (SCD type 2). The marts are never published as tables; only aggregates leave, with small groups suppressed. A deleted account's handles are removed at compaction ([D-039](#d-039-handles-are-looked-up-not-read-from-the-feed)).
+
+## D-039: Handles are looked up, not read from the feed
+
+**Found:** the first build of `dim_account` had handles for 3 of 1.8 million accounts. Jetstream's identity events had the handle in 28 of 74,610 cases. In the protocol the field is optional: an identity event says an account's identity changed, and anyone who needs the new handle is expected to resolve it. I'd built and tested the model against sample events that had handles, without checking what the real feed sends.
+
+**Decision:** a new hourly job, `resolve-handles`, reads the identity events in each new store commit and asks Bluesky's public API (`app.bsky.actor.getProfiles`) for those accounts' handles, 25 a call, at most two calls a second, backing off on 429s and server errors. Answers go into `account_handles`, and `dim_account` takes its handle history from there ([details](../architectures/handles.md)).
+
+**Why the API rather than resolving DID documents:** the AppView returns the handle only after checking it both ways (the DID claims the handle and the handle points back at the DID), and returns `handle.invalid` otherwise. Doing that check ourselves would mean a DNS or HTTPS request per handle on top of fetching the DID document. One call covers 25 accounts.
+
+**What's not kept:** the API also returns display names and bios. They're profile content, and the project keeps no record content ([D-026](#d-026-a-leaner-event-store)), so they're dropped.
+
+**Deletes:** handles are public, but a deleted account's handles are removed by compaction, so they don't outlive the account here.
+
+**Rejected:** the first plan, account history on status alone. Status changes are real (deactivations, deletions, suspensions: about 70,000 in the first days), but handle changes are the more useful history, and an enrichment step with an outside API, rate limits and retries is worth having in the pipeline anyway.
 

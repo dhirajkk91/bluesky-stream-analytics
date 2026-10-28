@@ -5,11 +5,12 @@ from pathlib import Path
 
 import pytest
 
-from sample_events import at_us, delete, edit_post, like, post, tid, write_hour_file
+from sample_events import account, at_us, delete, edit_post, like, post, tid, write_hour_file
 
 from bluesky_stream_analytics import compact
 from bluesky_stream_analytics.compact import (
     INTERACTIONS,
+    forget_handles_sql,
     POSTS,
     Athena,
     Scope,
@@ -22,6 +23,7 @@ from bluesky_stream_analytics.compact import (
     tier_for,
 )
 from bluesky_stream_analytics.event_store import COLUMNS, stage_batch
+from bluesky_stream_analytics.handles import HANDLE_COLUMNS
 from bluesky_stream_analytics.process import connect
 from bluesky_stream_analytics.projections import create_tables, fold_files
 
@@ -132,11 +134,12 @@ def test_a_run_redacts_before_removing_and_ends_with_the_markers():
     assert names == [
         "redact the event store", "redact the event store",
         "remove superseded rows", "remove superseded rows",
+        "forget handles of deleted accounts",
         "optimize records", "optimize records",
-        "optimize events", "optimize record_deletes",
+        "optimize events", "optimize record_deletes", "optimize account_handles",
     ]
-    assert plan("daily", TODAY)[6].sql.endswith("WHERE event_time >= TIMESTAMP '2026-10-23 00:00:00 UTC'")
-    assert plan("weekly", TODAY)[6].sql.endswith("USING BIN_PACK")
+    assert plan("daily", TODAY)[7].sql.endswith("WHERE event_time >= TIMESTAMP '2026-10-23 00:00:00 UTC'")
+    assert plan("weekly", TODAY)[7].sql.endswith("USING BIN_PACK")
 
 
 def test_daily_compaction_removes_deleted_and_old_versions_in_reach(con):
@@ -245,3 +248,19 @@ def test_redacted_events_folded_again_are_hidden_and_removed_next_time(con, tmp_
 
     assert current(con) == before
     assert (DELETED_LIKE, "3a1") not in records(con)
+
+
+def test_handles_of_deleted_accounts_are_forgotten(con, tmp_path):
+    con.execute(f"CREATE TABLE {SCHEMA}.account_handles ({HANDLE_COLUMNS})")
+    for did in ("did:gone", "did:stays"):
+        con.execute(f"INSERT INTO {SCHEMA}.account_handles VALUES (?, now(), 1, now(), ?, true)", [did, did + ".bsky.social"])
+    raw = write_hour_file(tmp_path / "raw2", 11, "y", [
+        account("did:gone", 5, at(NOW, 30), active=False, status="deleted"),
+        account("did:stays", 6, at(NOW, 30), active=False, status="deactivated"),
+    ])
+    stage_batch(con, [str(raw)])
+    con.execute(f"INSERT INTO {SCHEMA}.events SELECT * FROM batch")
+
+    con.execute(forget_handles_sql(datetime(2026, 10, 24, tzinfo=UTC), duckdb_timestamp))
+
+    assert con.execute(f"SELECT did FROM {SCHEMA}.account_handles").fetchall() == [("did:stays",)]

@@ -10,6 +10,7 @@ The pipeline turns Bluesky's public Jetstream feed into an event log collected n
 - [Projections](projections.md): current posts, likes, reposts, follows and blocks, with deletes applied
 - [Compaction](compaction.md): the nightly Athena job that physically removes deleted records, and the deletion policy
 - [Marts](marts.md): the star schema the metrics come from, built with dbt
+- [Handle lookups](handles.md): asking Bluesky's API for handles, since the feed doesn't carry them
 - [Query layer](query-layer.md): SQL on the raw files and the event store with Athena
 - [Infrastructure](infrastructure.md): the Oracle server and the AWS resources
 
@@ -78,7 +79,7 @@ flowchart LR
 2. **Finish the hour.** When an event from the next hour arrives, the current file is compressed with zstd and becomes read-only from then on.
 3. **Upload.** Every 10 minutes `upload` sends each finished file to S3 under the same path, with a checksum S3 verifies. Only after S3 confirms does it move the local copy to `uploaded/` for processing.
 4. **Process.** Every hour `process` loads the waiting files with DuckDB, removes duplicates, and appends the events the event store doesn't have yet. Then it deletes the local copies.
-5. **Project.** Right after, `project` reads the store commits added since its last run and appends new record versions and delete markers to the projections.
+5. **Project.** Right after, `project` reads the store commits added since its last run and appends new record versions and delete markers to the projections. Then `resolve-handles` looks up the handles of accounts whose identity changed in those commits.
 6. **Compact.** Every night `compact` has Athena redact deleted records in the event store, remove superseded rows from the projections and rewrite small files, reaching further back on Sundays and the 1st of the month. Two hours later, a vacuum deletes the files nothing refers to any more.
 7. **Build the marts.** Every night `dbt build` turns the event store into facts, dimensions and the daily metrics, and runs their tests.
 8. **Query.** Athena reads the raw files in place for checks, and the event store and the projections' views for everything else.
@@ -122,6 +123,7 @@ src/bluesky_stream_analytics/
     process.py       hourly job: appends handed-over files to the event store
     event_store.py   the SQL that parses, de-duplicates and appends events
     projections.py   hourly job: folds new store commits into the projections
+    handles.py       hourly job: looks up handles for identity changes
     compact.py       nightly job: compaction and redaction, run in Athena
     fetch_raw.py     downloads raw files from S3 for backfills
     fs.py            helper for durable renames

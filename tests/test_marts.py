@@ -13,6 +13,7 @@ import pytest
 from sample_events import account, at_us, follow, identity, like, post, profile, write_hour_file
 
 from bluesky_stream_analytics.event_store import COLUMNS, stage_batch
+from bluesky_stream_analytics.handles import HANDLE_COLUMNS
 
 PROJECT = Path(__file__).parents[1] / "transform"
 POST = "app.bsky.feed.post"
@@ -30,13 +31,13 @@ def at(day: int, hour: int = 12) -> int:
 EVENTS = [
     post("did:b", "3b1", at(24, 9), rev="3b01"),
     post("did:c", "3c1", at(24, 10), rev="3c01"),
-    identity("did:a", 10, at(25, 10), handle="a1.bsky.social"),
+    identity("did:a", 10, at(25, 10), handle=None),
     profile("did:a", at(25, 10), rev="3a01"),
     post("did:a", "3a1", at(25, 11), rev="3a02"),
     like("did:a", "3a2", at(25, 12), post_author="did:b", post_rkey="3b1", rev="3a03"),
     like("did:b", "3b2", at(25, 13), post_author="did:b", post_rkey="3b1", rev="3b02"),
     profile("did:c", at(25, 14), rev="3c02"),
-    identity("did:a", 20, at(26, 8), handle="a2.bsky.social"),
+    identity("did:a", 20, at(26, 8), handle=None),
     post("did:a", "3a3", at(26, 9), reply_to="at://did:b/app.bsky.feed.post/3b1", rev="3a04"),
     account("did:a", 21, at(26, 12), active=False, status="deactivated"),
     profile("did:d", at(26, 15), rev="3d01"),
@@ -44,10 +45,24 @@ EVENTS = [
 ]
 
 
+# Jetstream's identity events carry no handle, so the handle job looked them up.
+HANDLES = [
+    ("did:a", at(25, 10), 10, "a1.bsky.social", True),
+    ("did:a", at(26, 8), 20, "a2.bsky.social", True),
+]
+
+
 def write_store(path: Path, tmp: Path, lines: list[str]) -> None:
     con = duckdb.connect(str(path))
     con.execute("CREATE SCHEMA IF NOT EXISTS bluesky_store")
     con.execute(f"CREATE TABLE IF NOT EXISTS bluesky_store.events ({COLUMNS})")
+    if not con.execute("SELECT count(*) FROM information_schema.tables WHERE table_name = 'account_handles'").fetchone()[0]:
+        con.execute(f"CREATE TABLE bluesky_store.account_handles ({HANDLE_COLUMNS})")
+        for did, time_us, seq, handle, found in HANDLES:
+            con.execute(
+                "INSERT INTO bluesky_store.account_handles VALUES (?, make_timestamptz(?), ?, now(), ?, ?)",
+                [did, time_us, seq, handle, found],
+            )
     raw = write_hour_file(tmp, 10, f"f{len(list(tmp.rglob('*.zst')))}", lines)
     stage_batch(con, [str(raw)])
     con.execute("INSERT INTO bluesky_store.events SELECT * FROM batch")

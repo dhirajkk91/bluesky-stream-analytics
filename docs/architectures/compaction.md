@@ -86,7 +86,9 @@ One row per step goes into `compaction_runs`: when, the tier, the step and its r
 
 **The projections skip compaction's commits.** Redacting and rewriting add new files to the event store, holding events that are already folded. The projections job reads the store's Iceberg metadata, and only folds files from commits that are appends; compaction's commits are overwrites and replaces.
 
-Two hours later, `compact --vacuum` runs `VACUUM` on `records`, `record_deletes` and `events`. Every table keeps an hour of snapshots, so by then the snapshots from before compaction have expired, and the files only they referred to are deleted. That's the moment a deleted record's data is gone from S3.
+Compaction also removes the looked-up handles of accounts deleted within the tier's reach ([handle lookups](handles.md#deletes)), and optimizes `account_handles`.
+
+Two hours later, `compact --vacuum` runs `VACUUM` on `records`, `record_deletes`, `events` and `account_handles`. Every table keeps an hour of snapshots, so by then the snapshots from before compaction have expired, and the files only they referred to are deleted. That's the moment a deleted record's data is gone from S3.
 
 **Delete markers stay.** They're what stops a create replayed from a backfill from bringing a deleted record back ([D-031](../decisions/engineering-decisions.md#d-031-the-highest-rev-wins-and-deletes-leave-a-marker)). They hold only the key, `rev` and time.
 
