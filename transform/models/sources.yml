@@ -7,5 +7,7 @@ sources:
     tables:
       - name: events
         description: Every Jetstream event exactly once. See docs/architectures/event-store.md.
+      - name: current_records
+        description: The projections' view of every record that exists now, at its latest version. See docs/architectures/projections.md.
       - name: account_handles
         description: The handle of each account whose identity changed, looked up by the handle job. See docs/architectures/handles.md.

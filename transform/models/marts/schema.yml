@@ -71,3 +71,63 @@ models:
       - unique_combination:
           arguments:
             columns: [cohort_date, day_n]
+
+  - name: dim_post
+    description: >
+      One row per post that exists now, plus a placeholder (an inferred member) for every post a
+      reply points at that hasn't been seen. Rebuilt in full nightly, so deleted posts drop out.
+    columns:
+      - name: post_key
+        data_tests: [unique, not_null]
+      - name: is_placeholder
+        data_tests: [not_null]
+      - name: parent_post_key
+        description: Every reply's parent has a row, real or placeholder.
+        data_tests:
+          - relationships:
+              arguments:
+                to: ref('dim_post')
+                field: post_key
+      - name: root_post_key
+        data_tests:
+          - relationships:
+              arguments:
+                to: ref('dim_post')
+                field: post_key
+
+  - name: fct_post_engagement_daily
+    description: One row per post per day it received likes, reposts or replies from other accounts.
+    data_tests:
+      - unique_combination:
+          arguments:
+            columns: [activity_date, post_key]
+    columns:
+      - name: post_key
+        data_tests: [not_null]
+
+  - name: mart_engagement_by_post_age
+    description: Engagement received each day by the post's age in hours; 48 means two days or more, -1 unknown.
+    data_tests:
+      - unique_combination:
+          arguments:
+            columns: [activity_date, age_hours]
+    columns:
+      - name: age_hours
+        data_tests:
+          - accepted_values:
+              arguments:
+                values: [-1, 0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31, 32, 33, 34, 35, 36, 37, 38, 39, 40, 41, 42, 43, 44, 45, 46, 47, 48]
+                quote: false
+
+  - name: mart_post_metrics_daily
+    description: One row per day about posts. See docs/architectures/marts.md.
+    columns:
+      - name: date_day
+        data_tests: [unique, not_null]
+
+  - name: mart_posts_by_language_daily
+    description: Posts and replies made each day by first tagged language.
+    data_tests:
+      - unique_combination:
+          arguments:
+            columns: [date_day, language]

@@ -383,3 +383,13 @@ The marts key accounts by a SHA-256 hash of their DID, so raw account IDs don't 
 
 **Rejected:** the first plan, account history on status alone. Status changes are real (deactivations, deletions, suspensions: about 70,000 in the first days), but handle changes are the more useful history, and an enrichment step with an outside API, rate limits and retries is worth having in the pipeline anyway.
 
+## D-040: Posts come from the projections, with placeholders for unseen parents
+
+**Placeholders:** most replies answer a post we never saw, made before collection began or not yet delivered. `dim_post` gives each such parent a placeholder row (Kimball's inferred member) with the author from its URI and the creation time from its key, so every reply joins to a parent and a test can insist on it. When the real post's create arrives, it replaces the placeholder at the next build.
+
+**Built from the projections:** `dim_post` is rebuilt in full each night from `current_records`, not from the event store. Deleted posts, and their reply links, drop out at the next build with no deletion logic of their own; the projections and compaction already handle that. The cost is a full read of the current posts each night, about a tenth of the projections.
+
+**Rejected:** an incremental `dim_post` that merges new posts in and replaces placeholders in place. On Athena every merge reads the whole target to find matching rows, the same problem the projections ran into ([D-029](#d-029-projections-are-appended-to-not-updated-in-place)), and deletes would need handling a second time.
+
+**Post age from the key:** how long after a post its likes arrive is computed from the post's TID key, so it works for posts made before collection began, without a lookup.
+
