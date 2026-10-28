@@ -40,6 +40,9 @@ SNAPSHOT_RETENTION_SECONDS = 3600
 # range Athena reads, for apps whose clock was ahead when they made the key.
 EVENT_TIME_MARGIN = timedelta(days=1)
 
+# Every table compaction rewrites, and so vacuums.
+LAKE_TABLES = ("records", "record_deletes", "events", "account_handles")
+
 POSTS = ("app.bsky.feed.post", "app.bsky.feed.repost")
 INTERACTIONS = ("app.bsky.feed.like", "app.bsky.graph.follow", "app.bsky.graph.block")
 GROUP_NAMES = {POSTS: "posts and reposts", INTERACTIONS: "likes, follows and blocks"}
@@ -188,6 +191,20 @@ def optimize_events_sql(since: datetime | None, ts: Timestamp = athena_timestamp
     return f"OPTIMIZE {DATABASE}.events REWRITE DATA USING BIN_PACK WHERE event_time >= {ts(since - EVENT_TIME_MARGIN)}"
 
 
+def forget_handles_sql(since: datetime | None, ts: Timestamp = athena_timestamp) -> str:
+    """Remove the looked-up handles of accounts that were deleted."""
+    return f"""
+        MERGE INTO {DATABASE}.account_handles h
+        USING (
+            SELECT DISTINCT did
+            FROM {DATABASE}.events
+            WHERE kind = 'account' AND account_status = 'deleted' {_since("event_time", since, ts)}
+        ) d
+        ON h.did = d.did
+        WHEN MATCHED THEN DELETE
+    """
+
+
 def plan(tier: str, today: date) -> list[Step]:
     """
     Every step of one compaction run. Redaction comes first, while `records`
@@ -198,15 +215,18 @@ def plan(tier: str, today: date) -> list[Step]:
     widest = None if any(s.since is None for s in reaches) else min(s.since for s in reaches)
     steps = [Step("redact the event store", s.describe(), redact_sql(s)) for s in reaches]
     steps += [Step("remove superseded rows", s.describe(), remove_superseded_sql(s)) for s in reaches]
+    deleted_since = "all" if widest is None else f"deleted since {widest:%Y-%m-%d}"
+    steps.append(Step("forget handles of deleted accounts", deleted_since, forget_handles_sql(widest)))
     steps += [Step("optimize records", s.describe(), optimize_sql(s)) for s in reaches]
     reach = "all" if widest is None else f"since {widest - EVENT_TIME_MARGIN:%Y-%m-%d}"
     steps.append(Step("optimize events", reach, optimize_events_sql(widest)))
-    steps.append(Step("optimize record_deletes", "all", f"OPTIMIZE {DATABASE}.record_deletes REWRITE DATA USING BIN_PACK"))
+    for table in ("record_deletes", "account_handles"):
+        steps.append(Step(f"optimize {table}", "all", f"OPTIMIZE {DATABASE}.{table} REWRITE DATA USING BIN_PACK"))
     return steps
 
 
 def vacuum_plan() -> list[Step]:
-    return [Step(f"vacuum {t}", "all", f"VACUUM {DATABASE}.{t}") for t in ("records", "record_deletes", "events")]
+    return [Step(f"vacuum {t}", "all", f"VACUUM {DATABASE}.{t}") for t in LAKE_TABLES]
 
 
 def setup_steps(warehouse: str) -> list[Step]:
@@ -230,7 +250,7 @@ def setup_steps(warehouse: str) -> list[Step]:
             """,
         )
     ]
-    for table in ("records", "record_deletes", "events"):
+    for table in LAKE_TABLES:
         steps.append(
             Step(
                 f"table properties: {table}",

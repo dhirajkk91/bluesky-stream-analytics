@@ -25,7 +25,7 @@
   {{ return(adapter.dispatch('days_between')(start, end)) }}
 {%- endmacro %}
 {% macro athena__days_between(start, end) -%}
-  SELECT d AS date_day FROM UNNEST(sequence(DATE '{{ start }}', date_add('day', -1, DATE '{{ end }}'), INTERVAL '1' DAY)) AS t(d)
+  SELECT CAST(d AS DATE) AS date_day FROM UNNEST(sequence(DATE '{{ start }}', date_add('day', -1, DATE '{{ end }}'), INTERVAL '1' DAY)) AS t(d)
 {%- endmacro %}
 {% macro default__days_between(start, end) -%}
   SELECT CAST(range AS DATE) AS date_day FROM range(DATE '{{ start }}', DATE '{{ end }}', INTERVAL 1 DAY)

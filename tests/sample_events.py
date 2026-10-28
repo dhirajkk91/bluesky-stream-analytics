@@ -58,7 +58,10 @@ def delete(did, collection, rkey, ts, rev="3rev2"):
 
 
 def identity(did, seq, ts, handle="someone.bsky.social"):
-    body = {"did": did, "handle": handle, "seq": seq, "time": "2026-10-24T10:00:00.000Z"}
+    """Pass handle=None for what Jetstream nearly always sends: no handle at all."""
+    body = {"did": did, "seq": seq, "time": "2026-10-24T10:00:00.000Z"}
+    if handle is not None:
+        body["handle"] = handle
     return json.dumps({"did": did, "time_us": ts, "kind": "identity", "identity": body})
 
 

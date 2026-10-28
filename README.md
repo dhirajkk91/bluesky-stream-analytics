@@ -83,6 +83,7 @@ uv run process --warehouse s3://<bucket>/warehouse           # the same, into th
 uv run fetch-raw --bucket <bucket> --date 2026-10-24         # download a day of raw files to load again
 uv run project --warehouse s3://<bucket>/warehouse           # fold new event-store commits into the projections
 uv run compact --warehouse s3://<bucket>/warehouse           # tonight's compaction and redaction, in Athena
+uv run resolve-handles --warehouse s3://<bucket>/warehouse   # look up handles for new identity changes
 uv run dbt build --project-dir transform --profiles-dir transform   # build and test the marts in Athena (needs BUCKET)
 uv run --group bench python benchmarks/compare_engines.py <raw files>   # Spark against DuckDB, needs Java 17 or 21
 ```

@@ -7,3 +7,5 @@ sources:
     tables:
       - name: events
         description: Every Jetstream event exactly once. See docs/architectures/event-store.md.
+      - name: account_handles
+        description: The handle of each account whose identity changed, looked up by the handle job. See docs/architectures/handles.md.
