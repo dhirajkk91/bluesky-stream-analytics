@@ -192,7 +192,7 @@ After uploading, the uploader moves the file to `uploaded/` instead of deleting 
 
 **Why only `uploaded/`, not `events/`:** a file there is already in S3, and the uploader won't touch it again, so the job never races the uploader and never puts anything into the event store that isn't safely stored first.
 
-**Cost:** if the job is down, files pile up locally (about 5 GB a day, with about 90 GB free). Monitoring will watch that.
+**Cost:** if the job is down, files pile up locally (about 5 GB a day, with about 90 GB free). [Monitoring](../architectures/monitoring.md) watches that: an alert when uploaded files wait more than 2 hours, or the disk is 80% full.
 
 ## D-023: Raw files kept for 14 days
 
@@ -385,7 +385,7 @@ The marts key accounts by a SHA-256 hash of their DID, so raw account IDs don't 
 
 ## D-040: Posts come from the projections, with placeholders for unseen parents
 
-**Placeholders:** most replies answer a post we never saw, made before collection began or not yet delivered. `dim_post` gives each such parent a placeholder row (Kimball's inferred member) with the author from its URI and the creation time from its key, so every reply joins to a parent and a test can insist on it. When the real post's create arrives, it replaces the placeholder at the next build.
+**Placeholders:** some replies answer a post we never saw (30% on the first day of collection, 3% by the fourth), made before collection began or not yet delivered. `dim_post` gives each such parent a placeholder row (Kimball's inferred member) with the author from its URI and the creation time from its key, so every reply joins to a parent and a test can insist on it. When the real post's create arrives, it replaces the placeholder at the next build.
 
 **Built from the projections:** `dim_post` is rebuilt in full each night from `current_records`, not from the event store. Deleted posts, and their reply links, drop out at the next build with no deletion logic of their own; the projections and compaction already handle that. The cost is a full read of the current posts each night, about a tenth of the projections.
 
@@ -393,3 +393,17 @@ The marts key accounts by a SHA-256 hash of their DID, so raw account IDs don't 
 
 **Post age from the key:** how long after a post its likes arrive is computed from the post's TID key, so it works for posts made before collection began, without a lookup.
 
+
+## D-041: Alerts come from outside the server
+
+**Decision:** every scheduled job pings healthchecks.io when it succeeds, and a failed job pings with the end of its log. healthchecks.io emails when a job reports a failure or when a ping is late. A small `check-health` job adds what only the server can see, like the age of the newest event and the disk, and reports it the same way ([details](../architectures/monitoring.md)).
+
+**Why outside:** the worst failure is the server going down, and a server that's down can't send an email about it. Something elsewhere has to notice that the server has gone quiet. A dead man's switch does that by design, and the same pings also cover a job that fails, or one whose timer stopped starting it.
+
+**Rejected:**
+
+- Mail sent from the server, from a cron script or systemd: no mail when the server is down, which is the case that matters most.
+- CloudWatch alarms on metrics the server pushes, with missing data treated as an alarm. It works, but means the CloudWatch agent and another AWS key on an Oracle server, and a few dollars a month in custom metrics and alarms. healthchecks.io does the same for free.
+- Prometheus and Grafana: a monitoring stack bigger than what it watches. And to notice the server going down, it would need a second server.
+
+**Accepted:** an outside service in the alert path. If healthchecks.io is down there are no alerts, but the jobs carry on, since a ping never fails a job.

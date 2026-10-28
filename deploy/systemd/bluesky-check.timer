@@ -1,0 +1,9 @@
+[Unit]
+Description=Check the server's health every 10 minutes
+
+[Timer]
+OnCalendar=*:05/10
+Persistent=true
+
+[Install]
+WantedBy=timers.target

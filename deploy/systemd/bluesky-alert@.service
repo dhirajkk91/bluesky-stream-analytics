@@ -1,0 +1,16 @@
+[Unit]
+Description=Report that %i failed, with the end of its log, to healthchecks.io
+
+[Service]
+Type=oneshot
+User=bluesky
+Group=bluesky
+# Lets it read the failed unit's log.
+SupplementaryGroups=systemd-journal
+EnvironmentFile=-/etc/bluesky/monitor.env
+ExecStart=/bin/sh -c 'journalctl -u %i -n 40 --no-pager -o short-iso | /opt/bluesky-stream-analytics/.venv/bin/ping-check --fail --stdin %i'
+Environment=PYTHONUNBUFFERED=1
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=read-only

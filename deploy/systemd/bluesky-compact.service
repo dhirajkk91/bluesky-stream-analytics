@@ -2,6 +2,7 @@
 Description=Compact the projections and redact deleted records in the event store, in Athena
 After=network-online.target
 Wants=network-online.target
+OnFailure=bluesky-alert@%n.service
 
 [Service]
 Type=oneshot
@@ -9,8 +10,10 @@ User=bluesky
 Group=bluesky
 WorkingDirectory=/var/lib/bluesky
 EnvironmentFile=/etc/bluesky/process.env
+EnvironmentFile=-/etc/bluesky/monitor.env
 # The lock keeps it from committing to the tables while the hourly job does.
 ExecStart=/usr/bin/flock /var/lib/bluesky/lake.lock /opt/bluesky-stream-analytics/.venv/bin/compact --warehouse s3://${BUCKET}/warehouse
+ExecStartPost=/opt/bluesky-stream-analytics/.venv/bin/ping-check bluesky-compact
 Environment=PYTHONUNBUFFERED=1
 Nice=10
 StateDirectory=bluesky
