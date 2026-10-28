@@ -72,6 +72,23 @@ Handles are public on Bluesky, but a deleted account's handle shouldn't outlive 
 | The job dies between appending and logging | That commit is looked up again, and its rows appended twice. The marts take the latest per account and time, so it changes nothing |
 | An identity event arrives late, in an old hour | It's in a new commit, so it's looked up like any other |
 
+## In production
+
+The first run looked up every identity change since collection began, in 23 runs: one per commit that still has live files. Most of the store's files had been rewritten by compaction, and its commits were already expired by the vacuum, so the job couldn't tell them apart from appends and read them as new. For a first run that's exactly right, since every identity event in them still needed looking up.
+
+| | |
+|---|---|
+| Identity events | 88,247 |
+| Accounts looked up | 83,466 |
+| Found, with a handle | 72,319 (86.6%) |
+| Not returned: deleted, deactivated or suspended | 11,147 (13.4%) |
+| API calls | 3,347, no retries |
+| Time per hourly run since | 20 to 40 seconds |
+
+About one identity change in seven belongs to an account that's going away rather than changing its handle.
+
+After the next marts build, `dim_account` had handles for 71,673 of its 2,080,725 accounts, across 126,693 versions; 602 of them `handle.invalid`. The rest have never changed identity since collection began, so they have status history only.
+
 ## Cost
 
 About 25,000 identity events a day, about 1,000 API calls. The public API is free. Reading identity events reads only four columns of each new store file.

@@ -125,5 +125,6 @@ Logged in `compaction_runs` for every run. The first ones:
 | First run, monthly tier | everything | 4 min | 14.7 GB | 7 cents |
 | First nightly run, daily tier | records created since 24 October | 3 min | 16.6 GB | 8 cents |
 | First vacuum | all three tables | under a minute | 0 | under 1 cent |
+| Second nightly run, daily tier | records created since 25 October | 4.5 min | 22.1 GB | 11 cents |
 
-The daily run cost as much as the full one because the project started collecting on 24 October: three days back was still all of the data. The tiers only start saving once there's history older than their reach, from about 3 November for the daily run. That's when the estimate of about $2 a month gets its first real check, and when we'll see whether Athena really skips the partitions outside a run's reach.
+The daily runs cost as much as the full one, and more each night, because the project started collecting on 24 October: three days back was still nearly all of the data, and the data grows by about a day's worth each night. The tiers only start saving once there's history older than their reach, from about 3 November for the daily run. That's when the estimate of about $2 a month gets its first real check, and when we'll see whether Athena really skips the partitions outside a run's reach.
