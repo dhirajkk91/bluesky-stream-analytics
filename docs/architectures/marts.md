@@ -83,7 +83,9 @@ The facts and daily metrics are incremental: each night clears and rebuilds the 
 
 ## Posts we never saw
 
-Most replies answer posts that were made before collection began, or whose create hasn't reached us yet: Jetstream can deliver a reply before its parent. A star schema needs every reply's parent to have a row to join to, so `dim_post` adds a placeholder for each one (what Kimball calls an inferred member). A placeholder still has the author, from the parent's URI, and the creation time, decoded from its key. Once the real post's create arrives, the next build has the real row instead, and the placeholder is gone; a test checks every reply's parent and root have a row.
+Some replies answer posts that were made before collection began, or whose create hasn't reached us yet: Jetstream can deliver a reply before its parent. A star schema needs every reply's parent to have a row to join to, so `dim_post` adds a placeholder for each one (what Kimball calls an inferred member). A placeholder still has the author, from the parent's URI, and the creation time, decoded from its key. Once the real post's create arrives, the next build has the real row instead, and the placeholder is gone; a test checks every reply's parent and root have a row.
+
+A deleted parent gets a placeholder too, since it's no longer in `current_records`, so "unseen" means not seen or since deleted.
 
 `dim_post` is built in full each night from the [projections](projections.md)' `current_records`, not from the event store. That way a deleted post drops out of it at the next build, along with its reply links, with no deletion logic of its own ([D-040](../decisions/engineering-decisions.md#d-040-posts-come-from-the-projections-with-placeholders-for-unseen-parents)).
 
@@ -93,7 +95,7 @@ Most replies answer posts that were made before collection began, or whose creat
 |---|---|
 | Daily, weekly, monthly active | Accounts that wrote anything to a Bluesky record type (post, like, follow, profile edit and so on) on that day, in the 7 days, or in the 30 days ending that day |
 | New accounts | Accounts that created their profile that day with nothing seen from them more than an hour before. See below |
-| Posts, replies, likes, reposts, follows, blocks, deletes | Writes of each kind that day. A reply is a post with a parent |
+| Posts, replies, likes, reposts, follows, blocks, deletes | Writes of each kind that day. A reply is a post with a parent, and counts as a reply, not a post |
 | Engagement received | Likes, reposts and replies from other accounts. Liking your own post doesn't count |
 | Top 1% share | The share of the day's engagement received by the top 1% of the accounts that received any, rounded up to at least one account |
 | Gini | How unequal engagement received was that day: 0 if every account that received any got the same, close to 1 if one got nearly all |
@@ -148,6 +150,39 @@ The first `dbt build` in Athena ran every model and all 20 tests in 63 seconds, 
 | Day-1 retention of that day's new accounts | 21.5% | | |
 
 Two first findings: half of all likes, reposts and replies go to the top 1% of the accounts that receive any, and about one new account in five writes anything the next day.
+
+### The post models
+
+Their first build ran with the rest, all 46 models and tests passing in 3.5 minutes. `mart_engagement_by_post_age` took 2 of those, reading every day since 24 October; nightly it only redoes two.
+
+| | 24 October | 25 October | 26 October | 27 October |
+|---|---|---|---|---|
+| Posts | 421,403 | 1,831,456 | 1,956,242 | 1,982,009 |
+| Replies | 406,378 | 1,488,104 | 1,552,754 | 1,583,602 |
+| Replies to unseen posts | 30.0% | 10.3% | 4.9% | 3.2% |
+| Posts that got any engagement | 1.2 million | 3.5 million | 3.5 million | 3.5 million |
+| Engagement on posts | 7.0 million | 25.8 million | 28.2 million | 27.4 million |
+| Share to posts under a day old | 84% | 84% | 86% | 85% |
+
+24 October is the part of the day after collection began. `dim_post` had 12.66 million live posts, 46% of them replies, and 330,158 placeholders.
+
+**How fast things fade.** Engagement on 27 October by the age of the post it went to:
+
+| Post age | Share of the day's engagement | Cumulative |
+|---|---|---|
+| under 1 hour | 33.6% | 33.6% |
+| 1 to 2 hours | 10.3% | 43.9% |
+| 2 to 3 hours | 6.5% | 50.4% |
+| 3 to 12 hours | 23.3% | 73.7% |
+| 12 to 24 hours | 10.9% | 84.6% |
+| 1 to 2 days | 5.6% | 90.3% |
+| 2 days or more | 9.7% | 100% |
+
+A third of all likes, reposts and replies go to posts less than an hour old, and half to posts under three hours old. After that the hourly count roughly halves every 11 hours through the first day, then falls faster, halving in 6 hours from hour 24 to 30. Whether that bend is a feed dropping posts after a day, or just one day's rhythm, needs more days to tell. 0.09% of engagement went to posts whose key gave no believable creation time.
+
+**Replies to unseen posts fall as history builds up.** On the first day, 30% of replies answered a post from before collection began. By the fourth, 3.2% did, which is roughly the share of replies that answer posts more than a few days old, or ones deleted since.
+
+**Languages**, by first tag, on 27 October: English 56%, untagged 15%, Japanese 10%, then Portuguese, Spanish and German at about 3% each, French 1.9%, Nepali 1.5%, Korean 1.2% and Dutch 0.8%.
 
 ## Cost
 

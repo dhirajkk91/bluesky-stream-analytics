@@ -2,6 +2,7 @@
 Description=Upload finished Bluesky event files to S3
 After=network-online.target
 Wants=network-online.target
+OnFailure=bluesky-alert@%n.service
 
 [Service]
 Type=oneshot
@@ -9,7 +10,9 @@ User=bluesky
 Group=bluesky
 WorkingDirectory=/opt/bluesky-stream-analytics
 EnvironmentFile=/etc/bluesky/upload.env
+EnvironmentFile=-/etc/bluesky/monitor.env
 ExecStart=/opt/bluesky-stream-analytics/.venv/bin/upload --bucket ${BUCKET} --data-dir /var/lib/bluesky
+ExecStartPost=/opt/bluesky-stream-analytics/.venv/bin/ping-check bluesky-upload
 Environment=PYTHONUNBUFFERED=1
 StateDirectory=bluesky
 NoNewPrivileges=true

@@ -45,7 +45,7 @@ The projections are up too: what exists right now, with deletes applied, so 64.7
 
 Deletes are now real deletes, on a schedule. Every night a job in Athena blanks what a deleted record pointed at in the event store, removes deleted and outdated rows from the projections, and rewrites the files, and a vacuum two hours later deletes the old files from S3. Doing all of that over everything every night would have passed $25 a month within three months, so I measured how old records are when they're deleted (over a third are under a day old) and tiered it: recent days nightly, everything weekly or monthly depending on the record type. [The deletion policy and why](docs/architectures/compaction.md). There's also an [incidents log](docs/validation/incidents.md), starting with the morning Jetstream went quiet for 15 minutes.
 
-The metrics have started. A dbt project builds a star schema in Athena every night: about 1.3 million accounts write something on Bluesky each day, and about 19,000 new ones sign up. Half of all likes, reposts and replies go to the top 1% of the accounts that receive any, and about one new account in five writes anything the next day. Along the way, two surprises: Jetstream's identity events don't actually say what an account's new handle is, so a job now looks handles up through Bluesky's API; and most replies answer posts made before I started collecting, so those parents get placeholder rows until (if ever) they turn up. [The marts, and how each metric is defined](docs/architectures/marts.md).
+The metrics have started. A dbt project builds a star schema in Athena every night: about 1.3 million accounts write something on Bluesky each day, and about 19,000 new ones sign up. Half of all likes, reposts and replies go to the top 1% of the accounts that receive any, and about one new account in five writes anything the next day. Attention is also short: a third of all engagement goes to posts less than an hour old, and half to posts under three hours old. Along the way, two surprises: Jetstream's identity events don't actually say what an account's new handle is, so a job now looks handles up through Bluesky's API; and replies often answer posts I never saw (30% on the first day, 3% by the fourth), so those parents get placeholder rows until (if ever) they turn up. [The marts, and how each metric is defined](docs/architectures/marts.md).
 
 ## The plan
 
@@ -56,7 +56,7 @@ The metrics have started. A dbt project builds a star schema in Athena every nig
 5. ~~Turn the log into proper tables: an event store with each event once, then projections of current state with deletes applied~~
 6. Compact the projections nightly, so deleted records are physically gone by a stated deadline (built, being measured)
 7. ~~Build the product metrics on top, as a star schema~~
-8. Add monitoring so I know when something breaks
+8. Add monitoring so I know when something breaks (built, being set up)
 9. Put up the public dashboard
 
 This will probably change as I learn more.

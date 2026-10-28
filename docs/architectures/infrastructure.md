@@ -21,8 +21,11 @@ flowchart LR
             K["bluesky-compact.timer, bluesky-vacuum.timer<br/>→ compact"]
             D["/var/lib/bluesky"]
             E["/etc/bluesky/*.env<br/>root only"]
+            CH["bluesky-check.timer<br/>and every job's pings"]
         end
     end
+
+    HC["healthchecks.io<br/>emails on failure or silence"]
 
     subgraph AWS["AWS, us-east-1"]
         S3[("S3 bucket<br/>bluesky-stream-analytics-raw-&lt;account&gt;")]
@@ -51,6 +54,7 @@ flowchart LR
     TF -.->|creates| B
     TF -.->|creates| GL
     SSH -.-> VM
+    CH -->|"HTTPS"| HC
 ```
 
 ## The server
@@ -69,6 +73,7 @@ flowchart LR
 | `/var/lib/bluesky` | Collector data (`events/`, `state/cursor.json`), files waiting for the event store job (`uploaded/`), and DuckDB's extensions (`duckdb-extensions/`) |
 | `/etc/bluesky/upload.env` | Bucket name and the uploader's AWS key, `root:root`, mode `600` |
 | `/etc/bluesky/process.env` | Bucket name and the processor's AWS key, `root:root`, mode `600` |
+| `/etc/bluesky/monitor.env` | The healthchecks.io ping key, `root:root`, mode `600` |
 | `/etc/systemd/system/bluesky-*` | Copies of `deploy/systemd/` |
 
 | Unit | What it does |
@@ -83,6 +88,9 @@ flowchart LR
 | `bluesky-vacuum.service` | Runs `compact --vacuum`, which expires old snapshots and deletes unused files |
 | `bluesky-marts.timer` | Starts `bluesky-marts.service` at 04:30 UTC every night |
 | `bluesky-marts.service` | Runs `dbt build`, which builds and tests the marts in Athena |
+| `bluesky-check.timer` | Starts `bluesky-check.service` at :05, :15, :25 … every hour |
+| `bluesky-check.service` | Runs `check-health`, which checks the newest event, the file backlogs and the disk, and pings healthchecks.io ([monitoring](monitoring.md)) |
+| `bluesky-alert@.service` | Started by systemd when a scheduled job fails; sends the end of its log to healthchecks.io |
 | `bluesky-process.service` | Runs the event store job once, then the projections job, then the handle lookups. DuckDB is held to 2 threads and 3 GB, the service runs at a lower CPU priority than the collector, and systemd caps it at 4 GB of memory |
 
 All of them run as an unprivileged `bluesky` user, and the jobs that write to the lake tables take the same lock first (`flock /var/lib/bluesky/lake.lock`), so only one commits at a time ([D-035](../decisions/engineering-decisions.md#d-035-one-writer-at-a-time)). systemd keeps the rest of the filesystem read-only to them, so the only place they can write is `/var/lib/bluesky`. Logs go to the systemd journal.

@@ -13,6 +13,7 @@ The pipeline turns Bluesky's public Jetstream feed into an event log collected n
 - [Handle lookups](handles.md): asking Bluesky's API for handles, since the feed doesn't carry them
 - [Query layer](query-layer.md): SQL on the raw files and the event store with Athena
 - [Infrastructure](infrastructure.md): the Oracle server and the AWS resources
+- [Monitoring](monitoring.md): email alerts through healthchecks.io when a job fails, the stream stalls or the server goes quiet
 
 ## Architecture
 

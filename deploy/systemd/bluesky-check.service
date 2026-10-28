@@ -1,0 +1,16 @@
+[Unit]
+Description=Check the collector, the file backlog and the disk, and report to healthchecks.io
+
+[Service]
+Type=oneshot
+User=bluesky
+Group=bluesky
+WorkingDirectory=/var/lib/bluesky
+EnvironmentFile=-/etc/bluesky/monitor.env
+ExecStart=/opt/bluesky-stream-analytics/.venv/bin/check-health --data-dir /var/lib/bluesky
+Environment=PYTHONUNBUFFERED=1
+StateDirectory=bluesky
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=read-only
