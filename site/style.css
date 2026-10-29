@@ -52,7 +52,6 @@ body {
   font-family: var(--sans);
   font-size: 17px;
   line-height: 1.5;
-  font-variant-numeric: tabular-nums;
   -webkit-text-size-adjust: 100%;
 }
 
@@ -181,6 +180,7 @@ h1 .figure {
 
 .chart svg {
   --plot-background: var(--paper);
+  font-variant-numeric: tabular-nums;
   display: block;
   max-width: 100%;
   height: auto;
@@ -207,6 +207,7 @@ h1 .figure {
 
 table {
   border-collapse: collapse;
+  font-variant-numeric: tabular-nums;
   font-size: 15px;
   min-width: 420px;
 }

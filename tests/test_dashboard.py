@@ -120,3 +120,30 @@ def test_athena_rows_come_back_typed_across_pages():
 def test_a_failed_athena_query_raises():
     with pytest.raises(RuntimeError, match="SYNTAX_ERROR"):
         dashboard.Athena(FakeAthena("FAILED"))("SELECT 1")
+
+
+def test_catch_up_runs_dont_count_for_how_long_deletes_stayed_visible():
+    con = duckdb.connect()
+    con.execute("CREATE SCHEMA store")
+    con.execute("CREATE TABLE store.projection_runs (run_at TIMESTAMPTZ, oldest_delete_time TIMESTAMPTZ)")
+    # A rebuild folds two days of backlog back to back, then the hourly runs take over.
+    con.execute(
+        """
+        INSERT INTO store.projection_runs VALUES
+            ('2026-10-27 01:34:00+00', '2026-10-24 22:14:00+00'),
+            ('2026-10-27 01:35:00+00', '2026-10-25 00:00:00+00'),
+            ('2026-10-27 01:48:00+00', '2026-10-27 00:00:00+00'),
+            ('2026-10-27 02:20:00+00', '2026-10-27 01:00:00+00'),
+            ('2026-10-27 03:20:00+00', '2026-10-27 02:00:00+00'),
+            ('2026-10-27 05:20:00+00', '2026-10-27 02:59:00+00'),
+            ('2026-10-27 06:20:00+00', NULL)
+        """
+    )
+
+    def query(sql):
+        cursor = con.execute(sql)
+        names = [c[0] for c in cursor.description]
+        return [dict(zip(names, row)) for row in cursor.fetchall()]
+
+    sql = dashboard.DELETES_SQL.format(store="store", runs=dashboard.DELETE_RUNS, catch_up=dashboard.CATCH_UP_MINUTES)
+    assert dashboard.delete_visibility(query(sql)) == {"runs": 3, "average_minutes": 100, "longest_minutes": 141}

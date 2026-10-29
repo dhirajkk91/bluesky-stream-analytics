@@ -29,6 +29,7 @@ KEY = "dashboard/dashboard.json"
 MIN_GROUP = 100
 RECENT_DAYS = 7  # days summed for the post age curve and the languages
 DELETE_RUNS = 7 * 24  # hourly projection runs looked at for how long deletes stay visible
+CATCH_UP_MINUTES = 30  # a run this soon after the last one is folding a backlog, not the latest hour
 
 Query = Callable[[str], list[dict]]
 
@@ -66,10 +67,19 @@ GROUP BY language
 ORDER BY posts DESC
 """
 
+# Only scheduled runs say how long a delete stayed visible. Runs straight after
+# another are catching up on a backlog (a rebuild, or after downtime), and their
+# oldest delete can be days old.
 DELETES_SQL = """
+WITH runs AS (
+    SELECT run_at, oldest_delete_time, lag(run_at) OVER (ORDER BY run_at) AS previous_run
+    FROM {store}.projection_runs
+)
 SELECT date_diff('second', oldest_delete_time, run_at) AS visible_seconds
-FROM {store}.projection_runs
+FROM runs
 WHERE oldest_delete_time IS NOT NULL
+  AND previous_run IS NOT NULL
+  AND date_diff('minute', previous_run, run_at) >= {catch_up}
 ORDER BY run_at DESC
 LIMIT {runs}
 """
@@ -129,7 +139,7 @@ def build(query: Query, marts: str, store: str, collection_start: str, now: date
         "recent": window,
         "post_age": post_age,
         "languages": langs,
-        "deletes": delete_visibility(query(DELETES_SQL.format(store=store, runs=DELETE_RUNS))),
+        "deletes": delete_visibility(query(DELETES_SQL.format(store=store, runs=DELETE_RUNS, catch_up=CATCH_UP_MINUTES))),
         "min_group": MIN_GROUP,
     }
 
