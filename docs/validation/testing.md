@@ -398,3 +398,7 @@ That build also showed a gap the sample data had hidden: `dim_account` had handl
 - **Healthy:** the first `check-health` run reported "newest event 1s old, 0 files to upload, 0 files to process, disk 7% used", and its ping reached healthchecks.io.
 - **A failure:** starting `bluesky-alert@bluesky-upload.service` by hand sent a fail ping with the last 40 lines of the upload log. The check went red, the email arrived with the log in it, and the next real upload turned it green with a recovery email.
 - **Every job:** each check turned green on its job's first run, except `bluesky-marts`, whose timer turned out never to have been enabled ([details](../architectures/monitoring.md#in-production)).
+
+## The dashboard in production
+
+The first publish failed twice. The first time, the workflow's two settings had been saved where it couldn't read them, so it never asked AWS for anything. The second time AWS refused the token: the trust policy expected the repository as `dhirajkk91/bluesky-stream-analytics`, but GitHub's tokens name it with numeric IDs too, `dhirajkk91@72024303/bluesky-stream-analytics@1426294014`. CloudTrail logs every refused attempt with the token's subject, which is how the real value turned up. The policy now matches it exactly.
