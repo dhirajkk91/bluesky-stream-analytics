@@ -64,7 +64,7 @@ flowchart LR
 | Engagement by the age of the post, in hours | `mart_engagement_by_post_age` | the last 7 days, summed |
 | Day 1, 7 and 30 retention by signup day | `mart_retention` | every signup day |
 | Posts by language | `mart_posts_by_language_daily` | the last 7 days, summed |
-| How long deletes stay visible | `projection_runs` | the last 168 hourly runs |
+| How long deletes stay visible | `projection_runs` | the last 168 scheduled hourly runs. Runs that start within 30 minutes of the one before are catching up on a backlog, after a rebuild or downtime, and are left out: their oldest delete can be days old |
 
 The first day of collection began partway through, so it's left out of the charts and averages; the export marks it `partial`.
 
