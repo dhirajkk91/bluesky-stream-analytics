@@ -52,7 +52,7 @@ flowchart LR
 2. **Publish.** Every morning at 06:17 UTC, and whenever `site/` changes, a GitHub Actions workflow copies that file into `site/data/` and deploys `site/` to GitHub Pages.
 3. **Read.** The page is plain HTML, CSS and one script. It loads `data/dashboard.json` from its own site and draws the charts with [Observable Plot](https://observablehq.com/plot/).
 
-**No AWS key in GitHub.** The workflow gets credentials for one run from GitHub's OIDC provider: AWS trusts tokens that GitHub signs for this repository's Pages deployments, and the role they get can read that one file and nothing else ([D-042](../decisions/engineering-decisions.md#d-042-the-dashboard-is-a-static-page-with-the-data-baked-in)).
+**No AWS key in GitHub.** The workflow gets credentials for one run from GitHub's OIDC provider: AWS trusts tokens that GitHub signs for this repository's Pages deployments, and the role they get can read that one file and nothing else. The tokens name the repository by its numeric ID as well as its name (`dhirajkk91@72024303/bluesky-stream-analytics@1426294014`), and the trust policy matches on that, so a renamed or re-created repository with the same name wouldn't get in ([D-042](../decisions/engineering-decisions.md#d-042-the-dashboard-is-a-static-page-with-the-data-baked-in)).
 
 ## What it shows
 

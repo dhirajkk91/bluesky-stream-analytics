@@ -39,8 +39,10 @@ variable "raw_retention_days" {
   default     = 14
 }
 
+# GitHub's OIDC tokens name the repository with the owner's and repository's
+# numeric IDs, so a renamed or re-created repository doesn't match.
 variable "github_repository" {
-  description = "GitHub repository whose Pages workflow may read the dashboard export (owner/name)."
+  description = "Repository whose Pages workflow may read the dashboard export, as owner@owner_id/name@repo_id."
   type        = string
-  default     = "dhirajkk91/bluesky-stream-analytics"
+  default     = "dhirajkk91@72024303/bluesky-stream-analytics@1426294014"
 }
