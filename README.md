@@ -4,7 +4,7 @@
 
 Bluesky has a public live feed called Jetstream. It streams pretty much everything public happening on the network as it happens: posts, likes, reposts, follows, profile changes, deletes. No login needed to read it.
 
-The goal is to collect that feed nonstop and turn it into the kind of numbers a product team would actually look at, then put them on a simple public dashboard anyone can open and poke around in.
+The goal is to collect that feed nonstop and turn it into the kind of numbers a product team would actually look at, then put them on a simple public page anyone can open.
 
 Questions I want to be able to answer:
 
@@ -47,6 +47,10 @@ Deletes are now real deletes, on a schedule. Every night a job in Athena blanks 
 
 The metrics have started. A dbt project builds a star schema in Athena every night: about 1.3 million accounts write something on Bluesky each day, and about 19,000 new ones sign up. Half of all likes, reposts and replies go to the top 1% of the accounts that receive any, and about one new account in five writes anything the next day. Attention is also short: a third of all engagement goes to posts less than an hour old, and half to posts under three hours old. Along the way, two surprises: Jetstream's identity events don't actually say what an account's new handle is, so a job now looks handles up through Bluesky's API; and replies often answer posts I never saw (30% on the first day, 3% by the fourth), so those parents get placeholder rows until (if ever) they turn up. [The marts, and how each metric is defined](docs/architectures/marts.md).
 
+Monitoring is live. Every job pings [healthchecks.io](https://healthchecks.io) when it works, a failed one sends the end of its log, and a check every 10 minutes watches for a stalled stream, files piling up and a full disk. Since healthchecks.io expects the pings, a server that's down gets noticed too, and I get an email either way. Its first find, the next morning: the nightly marts build had never been scheduled, and had only ever run when I started it by hand. [How it works](docs/architectures/monitoring.md).
+
+And the numbers are public now: [dhirajkk91.github.io/bluesky-stream-analytics](https://dhirajkk91.github.io/bluesky-stream-analytics/). It's one page that reads like a short report. Each heading is a finding worked out from the data, so it stays true as the numbers move, and the caveats sit in the margin next to the chart they're about. After the nightly marts build, the server exports the totals to one small file, and a GitHub Actions workflow bakes it into the page every morning. The workflow gets AWS access for a few minutes at a time through GitHub's OIDC provider, so there's no AWS key in GitHub and nothing on AWS is public. [How it works](docs/architectures/dashboard.md).
+
 ## The plan
 
 1. ~~Connect to the feed and watch events come in~~ 
@@ -56,8 +60,8 @@ The metrics have started. A dbt project builds a star schema in Athena every nig
 5. ~~Turn the log into proper tables: an event store with each event once, then projections of current state with deletes applied~~
 6. Compact the projections nightly, so deleted records are physically gone by a stated deadline (built, being measured)
 7. ~~Build the product metrics on top, as a star schema~~
-8. Add monitoring so I know when something breaks (built, being set up)
-9. Put up the public dashboard
+8. ~~Add monitoring so I know when something breaks~~
+9. ~~Put up the public dashboard~~
 
 This will probably change as I learn more.
 
@@ -87,6 +91,9 @@ uv run project --warehouse s3://<bucket>/warehouse           # fold new event-st
 uv run compact --warehouse s3://<bucket>/warehouse           # tonight's compaction and redaction, in Athena
 uv run resolve-handles --warehouse s3://<bucket>/warehouse   # look up handles for new identity changes
 uv run dbt build --project-dir transform --profiles-dir transform   # build and test the marts in Athena (needs BUCKET)
+uv run export-dashboard --out site/data/dashboard.json      # the dashboard's numbers, from the marts
+uv run python -m http.server -d site 8000                   # then the page at localhost:8000
+uv run check-health --data-dir /var/lib/bluesky             # what the 10-minute health check sees
 uv run --group bench python benchmarks/compare_engines.py <raw files>   # Spark against DuckDB, needs Java 17 or 21
 ```
 
@@ -99,6 +106,12 @@ The AWS setup lives in `infra/aws/` as Terraform. The SQL in `sql/` gets saved i
 - [Collector](docs/architectures/collector.md): saving every event and surviving crashes
 - [Uploader](docs/architectures/uploader.md): getting files safely into S3
 - [Event store](docs/architectures/event-store.md): the hourly job and the table with every event once
+- [Projections](docs/architectures/projections.md): current posts, likes, reposts, follows and blocks, with deletes applied
+- [Compaction](docs/architectures/compaction.md): the deletion policy, and the nightly job that keeps it
+- [Handle lookups](docs/architectures/handles.md): asking Bluesky's API for handles, since the feed doesn't carry them
+- [Marts](docs/architectures/marts.md): the star schema, and how each metric is defined
+- [Dashboard](docs/architectures/dashboard.md): the public page
+- [Monitoring](docs/architectures/monitoring.md): email alerts when something breaks
 - [Query layer](docs/architectures/query-layer.md): SQL with Athena
 - [Infrastructure](docs/architectures/infrastructure.md): the Oracle server and the AWS side
 
@@ -108,3 +121,4 @@ The AWS setup lives in `infra/aws/` as Terraform. The SQL in `sql/` gets saved i
 **Validation**
 - [Testing](docs/validation/testing.md): tests, the kill test, real runs on the server, Spark against DuckDB, and a pattern in connection drops
 - [CI](docs/validation/ci.md)
+- [Incidents](docs/validation/incidents.md): what went wrong in production, and what changed because of it

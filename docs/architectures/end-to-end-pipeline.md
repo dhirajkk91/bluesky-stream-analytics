@@ -13,6 +13,7 @@ The pipeline turns Bluesky's public Jetstream feed into an event log collected n
 - [Handle lookups](handles.md): asking Bluesky's API for handles, since the feed doesn't carry them
 - [Query layer](query-layer.md): SQL on the raw files and the event store with Athena
 - [Infrastructure](infrastructure.md): the Oracle server and the AWS resources
+- [Dashboard](dashboard.md): the public page, a static site rebuilt each morning from the marts
 - [Monitoring](monitoring.md): email alerts through healthchecks.io when a job fails, the stream stalls or the server goes quiet
 
 ## Architecture
@@ -40,6 +41,7 @@ flowchart LR
 | Event store | Each event once, typed, no record content | Append only, never updated | Built |
 | Projections | What exists right now, with deletes applied | New versions and delete markers appended each hour, the latest picked by views | Built |
 | Marts | Kimball star schema: facts like engagement, dimensions like accounts with full history (SCD type 2) | Rebuilt nightly with dbt in Athena, the last two days each time | Built |
+| Public dashboard | Totals from the marts, with small groups folded away | Exported after each marts build, published each morning | Built |
 
 Writes and reads are kept apart in the CQRS sense. The event store is shaped for appending what happened. The projections and marts are read models, each shaped for the questions asked of it, and any of them can be thrown away and rebuilt from the store.
 

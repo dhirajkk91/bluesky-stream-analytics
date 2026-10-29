@@ -385,7 +385,7 @@ The marts key accounts by a SHA-256 hash of their DID, so raw account IDs don't 
 
 ## D-040: Posts come from the projections, with placeholders for unseen parents
 
-**Placeholders:** some replies answer a post we never saw (30% on the first day of collection, 3% by the fourth), made before collection began or not yet delivered. `dim_post` gives each such parent a placeholder row (Kimball's inferred member) with the author from its URI and the creation time from its key, so every reply joins to a parent and a test can insist on it. When the real post's create arrives, it replaces the placeholder at the next build.
+**Placeholders:** some replies answer a post never seen here (30% on the first day of collection, 3% by the fourth), made before collection began or not yet delivered. `dim_post` gives each such parent a placeholder row (Kimball's inferred member) with the author from its URI and the creation time from its key, so every reply joins to a parent and a test can insist on it. When the real post's create arrives, it replaces the placeholder at the next build.
 
 **Built from the projections:** `dim_post` is rebuilt in full each night from `current_records`, not from the event store. Deleted posts, and their reply links, drop out at the next build with no deletion logic of their own; the projections and compaction already handle that. The cost is a full read of the current posts each night, about a tenth of the projections.
 
@@ -407,3 +407,22 @@ The marts key accounts by a SHA-256 hash of their DID, so raw account IDs don't 
 - Prometheus and Grafana: a monitoring stack bigger than what it watches. And to notice the server going down, it would need a second server.
 
 **Accepted:** an outside service in the alert path. If healthchecks.io is down there are no alerts, but the jobs carry on, since a ping never fails a job.
+
+## D-042: The dashboard is a static page with the data baked in
+
+**Decision:** the dashboard is a static page on GitHub Pages. After the marts build, the server exports the totals the page shows to one JSON file in the private bucket. Each morning a GitHub Actions workflow copies that file into the site and deploys it. The workflow reads the file with credentials from GitHub's OIDC provider, through a role that can read that one file and is trusted only for this repository's Pages deployments ([details](../architectures/dashboard.md)).
+
+**Why:**
+
+- **Nothing on AWS is public.** The bucket stays private, and a visitor only ever reaches GitHub. The page can't run up an Athena bill or expose anything the export didn't choose to put in the file.
+- **No long-lived key in GitHub.** OIDC credentials last for one run. A leaked repository secret can't happen if there isn't one.
+- **The privacy rule lives in the export,** in Python with tests, so a small group never leaves the server, whatever the page does.
+
+**Rejected:**
+
+- **A public S3 bucket the page fetches from**, my first plan. It works, but opens a bucket to the internet, needs CORS, and puts the AWS account ID in the page's source.
+- **Committing the JSON to the repository every night**: a commit a day of generated data, and a GitHub token on the server.
+- **Streamlit or Grafana:** a server that's always on, to show numbers that change once a day.
+- **The page querying Athena live:** a cost per visitor, and AWS reachable from the internet.
+
+**Accepted:** the page is only as fresh as its last deploy. The workflow runs once a day after the marts, and the page says when it was updated.

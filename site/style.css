@@ -1,0 +1,295 @@
+:root {
+  color-scheme: light;
+  --paper: #f6f8fa;
+  --ink: #16212b;
+  --ink-soft: #4a5866;
+  --ink-faint: #7a8794;
+  --rule: #d8dee5;
+  --grid: #e6eaef;
+  --series-1: #2a78d6;
+  --series-2: #eb6834;
+  --tint: 42 120 214;
+  --sans: "Schibsted Grotesk", system-ui, sans-serif;
+  --serif: "Source Serif 4", Georgia, serif;
+}
+
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) {
+    color-scheme: dark;
+    --paper: #121a21;
+    --ink: #e8edf1;
+    --ink-soft: #a9b5c0;
+    --ink-faint: #7f8b96;
+    --rule: #2b3640;
+    --grid: #222c35;
+    --series-1: #3987e5;
+    --series-2: #d95926;
+    --tint: 57 135 229;
+  }
+}
+
+:root[data-theme="dark"] {
+  color-scheme: dark;
+  --paper: #121a21;
+  --ink: #e8edf1;
+  --ink-soft: #a9b5c0;
+  --ink-faint: #7f8b96;
+  --rule: #2b3640;
+  --grid: #222c35;
+  --series-1: #3987e5;
+  --series-2: #d95926;
+  --tint: 57 135 229;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+body {
+  margin: 0;
+  background: var(--paper);
+  color: var(--ink);
+  font-family: var(--sans);
+  font-size: 17px;
+  line-height: 1.5;
+  font-variant-numeric: tabular-nums;
+  -webkit-text-size-adjust: 100%;
+}
+
+a {
+  color: inherit;
+  text-decoration-color: var(--series-1);
+  text-decoration-thickness: 2px;
+  text-underline-offset: 3px;
+}
+
+a:focus-visible {
+  outline: 2px solid var(--series-1);
+  outline-offset: 2px;
+}
+
+/* Page frame: a reading column, with a margin for notes on wide screens. */
+.masthead,
+#report,
+.colophon {
+  width: min(100% - 32px, 1040px);
+  margin-inline: auto;
+}
+
+.masthead {
+  padding: 56px 0 40px;
+  border-bottom: 1px solid var(--rule);
+}
+
+.project {
+  margin: 0 0 40px;
+  font-size: 15px;
+  color: var(--ink-soft);
+}
+
+.project a {
+  text-decoration: none;
+  font-weight: 500;
+}
+
+.project a:hover {
+  text-decoration: underline;
+}
+
+h1 {
+  max-width: 17em;
+  margin: 0;
+  font-size: clamp(30px, 4.6vw, 52px);
+  line-height: 1.12;
+  font-weight: 500;
+  letter-spacing: -0.02em;
+}
+
+/* The headline's number is the one loud thing on the page. */
+h1 .figure {
+  display: block;
+  margin: 4px 0 2px;
+  font-size: 2.3em;
+  line-height: 1;
+  font-weight: 700;
+  letter-spacing: -0.035em;
+  color: var(--series-1);
+}
+
+.standfirst {
+  max-width: 38em;
+  margin: 24px 0 0;
+  color: var(--ink-soft);
+}
+
+.status {
+  padding: 48px 0;
+  color: var(--ink-soft);
+}
+
+/* Each section: the finding, its chart, and a note in the margin. */
+.finding {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 248px;
+  column-gap: 48px;
+  padding: 48px 0;
+  border-bottom: 1px solid var(--rule);
+}
+
+.finding > * {
+  grid-column: 1;
+}
+
+.finding h2 {
+  max-width: 24em;
+  margin: 0 0 8px;
+  font-size: 25px;
+  line-height: 1.25;
+  font-weight: 500;
+  letter-spacing: -0.01em;
+}
+
+.finding .lede {
+  max-width: 36em;
+  margin: 0 0 24px;
+  color: var(--ink-soft);
+}
+
+.finding .note {
+  grid-column: 2;
+  grid-row: 1 / span 4;
+  align-self: start;
+  margin: 6px 0 0;
+  padding-left: 16px;
+  border-left: 2px solid var(--rule);
+  font-family: var(--serif);
+  font-style: italic;
+  font-size: 15.5px;
+  line-height: 1.55;
+  color: var(--ink-soft);
+}
+
+.note p {
+  margin: 0 0 10px;
+}
+
+.chart {
+  width: 100%;
+  min-height: 120px;
+  color: var(--ink-soft);
+}
+
+.chart svg {
+  --plot-background: var(--paper);
+  display: block;
+  max-width: 100%;
+  height: auto;
+  overflow: visible;
+  font-family: var(--sans);
+  font-size: 12px;
+}
+
+.chart + .chart {
+  margin-top: 28px;
+}
+
+.chart-title {
+  margin: 0 0 6px;
+  font-size: 15px;
+  font-weight: 500;
+  color: var(--ink);
+}
+
+/* Retention: a small table, shaded by rate. */
+.table-wrap {
+  overflow-x: auto;
+}
+
+table {
+  border-collapse: collapse;
+  font-size: 15px;
+  min-width: 420px;
+}
+
+th,
+td {
+  padding: 8px 14px 8px 0;
+  text-align: right;
+  white-space: nowrap;
+}
+
+th:first-child,
+td:first-child {
+  text-align: left;
+}
+
+thead th {
+  font-weight: 500;
+  color: var(--ink-soft);
+  border-bottom: 1px solid var(--rule);
+}
+
+tbody tr + tr td {
+  border-top: 1px solid var(--grid);
+}
+
+td.rate {
+  min-width: 76px;
+  padding-right: 10px;
+  border-radius: 4px;
+  background: rgb(var(--tint) / var(--alpha, 0));
+}
+
+td.pending {
+  color: var(--ink-faint);
+}
+
+/* Pipeline facts at the end. */
+.facts {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(240px, 1fr));
+  gap: 24px 32px;
+  margin: 0;
+}
+
+.facts div {
+  border-top: 2px solid var(--ink);
+  padding-top: 10px;
+}
+
+.facts dt {
+  font-size: 15px;
+  color: var(--ink-soft);
+}
+
+.facts dd {
+  margin: 2px 0 0;
+  font-size: 22px;
+  font-weight: 500;
+}
+
+.colophon {
+  padding: 40px 0 72px;
+  max-width: 680px;
+  margin-left: max(16px, (100% - 1040px) / 2);
+  font-size: 15px;
+  color: var(--ink-soft);
+}
+
+@media (max-width: 860px) {
+  .finding {
+    display: block;
+  }
+
+  .finding .note {
+    margin-top: 24px;
+  }
+
+  .masthead {
+    padding-top: 32px;
+  }
+
+  .project {
+    margin-bottom: 28px;
+  }
+}

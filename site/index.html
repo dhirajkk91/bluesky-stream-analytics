@@ -1,0 +1,30 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Bluesky, measured</title>
+  <meta name="description" content="Daily totals from Bluesky's public event stream: who writes, what they do, where attention goes and how fast it fades.">
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Schibsted+Grotesk:wght@400;500;700&family=Source+Serif+4:ital,opsz,wght@1,8..60,400&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="style.css">
+  <script type="module" src="app.js"></script>
+</head>
+<body>
+  <header class="masthead">
+    <p class="project"><a href="https://github.com/dhirajkk91/bluesky-stream-analytics">bluesky-stream-analytics</a></p>
+    <h1 id="headline">Bluesky, measured</h1>
+    <p class="standfirst" id="standfirst">Daily totals from Bluesky's public event stream.</p>
+  </header>
+
+  <main id="report" aria-live="polite">
+    <p class="status" id="status">Loading the numbers…</p>
+  </main>
+
+  <footer class="colophon">
+    <p>Built from every public event on <a href="https://github.com/bluesky-social/jetstream">Jetstream</a>, Bluesky's public feed of writes, collected since <span id="since">24 October 2026</span>. Only totals are shown: nothing about any account or post, and groups smaller than <span id="min-group">100</span> are folded into “other” or left out. Deleted records are removed on a <a href="https://github.com/dhirajkk91/bluesky-stream-analytics/blob/main/docs/architectures/compaction.md">stated schedule</a>.</p>
+    <p><a href="https://github.com/dhirajkk91/bluesky-stream-analytics">How it's built</a>, and <a href="https://github.com/dhirajkk91/bluesky-stream-analytics/blob/main/docs/architectures/marts.md">how each number is defined</a>.</p>
+  </footer>
+</body>
+</html>

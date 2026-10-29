@@ -108,6 +108,13 @@ data "aws_iam_policy_document" "processor_marts" {
       "arn:aws:glue:${var.region}:${data.aws_caller_identity.current.account_id}:table/${aws_glue_catalog_database.marts.name}/*",
     ]
   }
+
+  # After the build, the dashboard's numbers are exported for the public page.
+  statement {
+    sid       = "WriteDashboardExport"
+    actions   = ["s3:PutObject"]
+    resources = ["${aws_s3_bucket.raw.arn}/${local.dashboard_prefix}/*"]
+  }
 }
 
 # A managed policy rather than another inline one: IAM caps all of a user's

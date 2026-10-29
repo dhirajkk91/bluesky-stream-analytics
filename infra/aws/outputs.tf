@@ -22,3 +22,8 @@ output "warehouse" {
   description = "Iceberg warehouse location for the event store, projections and marts."
   value       = "s3://${aws_s3_bucket.raw.bucket}/${local.warehouse_prefix}"
 }
+
+output "dashboard_role_arn" {
+  description = "Role the GitHub Pages workflow assumes to read the dashboard export."
+  value       = aws_iam_role.dashboard.arn
+}

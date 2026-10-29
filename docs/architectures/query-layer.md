@@ -4,18 +4,7 @@
 
 Athena runs SQL directly on the raw hourly files in S3, with nothing loaded or copied first. That's for checking the collector's output: how many events arrived, whether any minute is missing, and how many duplicates the resume rewinds created. The [event store](event-store.md) table `bluesky_store.events` and the [projections](projections.md)' views are queried through the same workgroup. They're typed and columnar, so they're the ones to use for anything else.
 
-## Goals and non-goals
-
-Goals:
-
-- Query every uploaded hour as soon as it lands, with no crawler or partition registration to run.
-- Keep the raw table exactly as faithful as the files: no field dropped or reinterpreted.
-- Cap what any single query can cost.
-
-Non-goals:
-
-- Removing duplicates or applying deletes.
-- Typed, columnar tables. Every query here parses JSON, which is fine for exploring and too slow to build metrics on.
+Every uploaded hour can be queried as soon as it lands, with no crawler or partition registration to run, and the raw table is exactly as faithful as the files: nothing dropped, deduplicated or reinterpreted. Every query here parses JSON, which is fine for exploring and too slow to build metrics on. The workgroup caps what any single query can cost.
 
 ## Design
 

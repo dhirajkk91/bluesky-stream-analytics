@@ -24,6 +24,7 @@ compact = "bluesky_stream_analytics.compact:main"
 resolve-handles = "bluesky_stream_analytics.handles:main"
 check-health = "bluesky_stream_analytics.monitor:check_main"
 ping-check = "bluesky_stream_analytics.monitor:ping_main"
+export-dashboard = "bluesky_stream_analytics.dashboard:main"
 
 [dependency-groups]
 bench = [
