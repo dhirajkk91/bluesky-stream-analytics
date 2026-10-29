@@ -108,10 +108,11 @@ def _oldest_age(paths: list[Path], now: float) -> float | None:
 def find_problems(
     data_dir: Path,
     now: float | None = None,
-    disk_usage: Callable[[Path], tuple] = shutil.disk_usage,
+    disk_usage: Callable[[Path], tuple] | None = None,
 ) -> tuple[list[str], str]:
     """What's wrong on the server, as messages, and a one-line summary of what was measured."""
     now = time.time() if now is None else now
+    disk_usage = disk_usage or shutil.disk_usage
     problems: list[str] = []
     summary: list[str] = []
 

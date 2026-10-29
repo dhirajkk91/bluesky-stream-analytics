@@ -4,20 +4,7 @@
 
 Account history in the [marts](marts.md) follows handles: `alice.bsky.social` becoming `alice.com` starts a new version of the account. Jetstream's identity events are supposed to be where handle changes show up, but they almost never carry the handle. Of the first 74,610 identity events, 28 had one. In the protocol the field is optional: an identity event is a signal that an account's identity changed, and anyone who needs the new handle is expected to look it up.
 
-`resolve-handles` does that lookup, and keeps the answers in the event store's database for the marts to use.
-
-## Goals and non-goals
-
-Goals:
-
-- A handle for every account whose identity changes, from the moment collection started.
-- Polite to the API: well under its limits, backing off when asked to.
-- Safe to rerun: a crash means the same commit is looked up again, nothing lost.
-
-Non-goals:
-
-- Handles for accounts whose identity never changes while we watch. Most accounts never change, and the marts don't need their handles; only changes make history.
-- Display names, bios or other profile content. The API returns them; they're deliberately not stored.
+`resolve-handles` does that lookup, and keeps the answers in the event store's database for the marts to use. It only looks up accounts whose identity changes, since only changes make history, and it keeps the handle and nothing else: the API also returns display names and bios, and they're deliberately not stored.
 
 ## Design
 

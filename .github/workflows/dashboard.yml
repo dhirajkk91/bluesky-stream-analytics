@@ -1,0 +1,47 @@
+name: Dashboard
+
+# Publishes site/ to GitHub Pages with the latest export from the nightly marts
+# build: every morning after it, whenever the page's code changes, and by hand.
+on:
+  schedule:
+    - cron: "17 6 * * *"
+  push:
+    branches: [main]
+    paths:
+      - "site/**"
+      - ".github/workflows/dashboard.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+concurrency:
+  group: pages
+  cancel-in-progress: false
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - uses: actions/checkout@v7
+
+      # Short-lived credentials from GitHub's OIDC provider; no AWS key is stored here.
+      - uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ vars.DASHBOARD_ROLE_ARN }}
+          aws-region: us-east-1
+
+      - name: Fetch the latest export
+        run: aws s3 cp "s3://${{ vars.DATA_BUCKET }}/dashboard/dashboard.json" site/data/dashboard.json
+
+      - uses: actions/configure-pages@v5
+      - uses: actions/upload-pages-artifact@v3
+        with:
+          path: site
+      - id: deployment
+        uses: actions/deploy-pages@v4

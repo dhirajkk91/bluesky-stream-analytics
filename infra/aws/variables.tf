@@ -38,3 +38,9 @@ variable "raw_retention_days" {
   type        = number
   default     = 14
 }
+
+variable "github_repository" {
+  description = "GitHub repository whose Pages workflow may read the dashboard export (owner/name)."
+  type        = string
+  default     = "dhirajkk91/bluesky-stream-analytics"
+}

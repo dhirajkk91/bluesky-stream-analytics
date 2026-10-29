@@ -87,7 +87,7 @@ flowchart LR
 | `bluesky-vacuum.timer` | Starts `bluesky-vacuum.service` at 05:45 UTC every night |
 | `bluesky-vacuum.service` | Runs `compact --vacuum`, which expires old snapshots and deletes unused files |
 | `bluesky-marts.timer` | Starts `bluesky-marts.service` at 04:30 UTC every night |
-| `bluesky-marts.service` | Runs `dbt build`, which builds and tests the marts in Athena |
+| `bluesky-marts.service` | Runs `dbt build`, which builds and tests the marts in Athena, then `export-dashboard`, which writes the dashboard's numbers to S3 |
 | `bluesky-check.timer` | Starts `bluesky-check.service` at :05, :15, :25 … every hour |
 | `bluesky-check.service` | Runs `check-health`, which checks the newest event, the file backlogs and the disk, and pings healthchecks.io ([monitoring](monitoring.md)) |
 | `bluesky-alert@.service` | Started by systemd when a scheduled job fails; sends the end of its log to healthchecks.io |
@@ -101,13 +101,14 @@ A1 capacity is only needed to start an instance, so the server is rebooted, neve
 
 | Resource | Setup |
 |---|---|
-| S3 bucket `bluesky-stream-analytics-raw-<account id>` | `us-east-1`, private, public access blocked, encrypted, HTTPS only, incomplete uploads cleaned up after 1 day. Raw files under `raw/` expire after 14 days; Iceberg tables live under `warehouse/` |
+| S3 bucket `bluesky-stream-analytics-raw-<account id>` | `us-east-1`, private, public access blocked, encrypted, HTTPS only, incomplete uploads cleaned up after 1 day. Raw files under `raw/` expire after 14 days; Iceberg tables live under `warehouse/`, and the dashboard's export under `dashboard/` |
 | IAM user `bluesky-stream-analytics-uploader` | Only `s3:PutObject` under `raw/`. Its access key is created outside Terraform, so the secret never lands in the state file |
 | IAM user `bluesky-stream-analytics-processor` | Reads, writes and deletes under `warehouse/`, reads (never changes) `raw/`, and creates and updates tables in `bluesky_store` only. It can also read the Glue catalog and list database names, which Glue's Iceberg REST endpoint needs. For compaction and the marts, it can run queries in the project's Athena workgroup and write their results under `athena-results/`, and manage tables in `bluesky_marts`. That last part is a managed policy attached to the user, because IAM caps a user's inline policies at 2,048 characters in total. Key created outside Terraform too |
 | Glue database `bluesky_store` | The event store's Iceberg table, located at `warehouse/bluesky_store/` |
 | Glue database `bluesky_marts` | The marts, created and replaced by dbt, located at `warehouse/bluesky_marts/` |
 | Glue database `bluesky`, table `raw_events` | External table over `raw/events/`, partitions projected from the path. See [query layer](query-layer.md) |
 | Athena workgroup `bluesky-stream-analytics` | 10 GB scan limit per query, results in `athena-results/` (expire after 7 days), settings enforced |
+| IAM role `bluesky-stream-analytics-dashboard` | Assumed by the dashboard's GitHub Actions workflow through GitHub's OIDC provider, only for this repository's Pages deployments. It can read `dashboard/dashboard.json` and nothing else. The processor can write that file ([dashboard](dashboard.md)) |
 | Budget `bluesky-stream-analytics-monthly` | $10 a month, measured before credits. Emails at 80% of actual spend and when the month is forecast to go over |
 
 Terraform state is kept locally and ignored by git.

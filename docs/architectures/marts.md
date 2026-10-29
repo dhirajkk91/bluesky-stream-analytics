@@ -4,20 +4,9 @@
 
 The marts are where the product metrics come from: how many accounts are active, how many are new and whether they stay, what people do, and how concentrated attention is. They're a Kimball star schema built with dbt from the [event store](event-store.md), so each metric is defined once, in SQL, with tests.
 
-They come in two parts: accounts (activity, engagement received, history, retention) and posts (engagement per post, how fast it arrives, languages, and replies to posts we never saw).
+They come in two parts: accounts (activity, engagement received, history, retention) and posts (engagement per post, how fast it arrives, languages, and replies to posts never seen).
 
-## Goals and non-goals
-
-Goals:
-
-- Every metric defined once, in one place, with its caveats written next to it.
-- Rebuilt daily for the day before, at the cost of a cent or so.
-- Tested twice: on the real data in Athena, and on a hand-made sample in CI with numbers worked out by hand.
-
-Non-goals:
-
-- Publishing anything. The marts are private; only aggregates leave, through the dashboard, with small groups suppressed.
-- Real time. Daily is enough for these metrics, and keeps the cost flat.
+Each metric has its caveats written next to it, below. The marts are rebuilt every night for about a cent, and tested twice: on the real data in Athena, and on a hand-made sample in CI with the numbers worked out by hand. Nothing is published from here; only totals leave, through the [dashboard](dashboard.md), with small groups folded away.
 
 ## Design
 
@@ -81,9 +70,9 @@ flowchart LR
 
 The facts and daily metrics are incremental: each night clears and rebuilds the last 2 days, since an hour can reach the event store late. The account dimension is a few rows per account, so rebuilding it in full stays cheap.
 
-## Posts we never saw
+## Posts never seen
 
-Some replies answer posts that were made before collection began, or whose create hasn't reached us yet: Jetstream can deliver a reply before its parent. A star schema needs every reply's parent to have a row to join to, so `dim_post` adds a placeholder for each one (what Kimball calls an inferred member). A placeholder still has the author, from the parent's URI, and the creation time, decoded from its key. Once the real post's create arrives, the next build has the real row instead, and the placeholder is gone; a test checks every reply's parent and root have a row.
+Some replies answer posts that were made before collection began, or whose create hasn't arrived yet: Jetstream can deliver a reply before its parent. A star schema needs every reply's parent to have a row to join to, so `dim_post` adds a placeholder for each one (what Kimball calls an inferred member). A placeholder still has the author, from the parent's URI, and the creation time, decoded from its key. Once the real post's create arrives, the next build has the real row instead, and the placeholder is gone; a test checks every reply's parent and root have a row.
 
 A deleted parent gets a placeholder too, since it's no longer in `current_records`, so "unseen" means not seen or since deleted.
 
@@ -127,7 +116,7 @@ A deleted parent gets a placeholder too, since it's no longer in `current_record
 
 ## Running it
 
-`bluesky-marts.timer` starts `dbt build` at 04:30 UTC, after compaction and before the vacuum. It builds every model and runs every test; a failing test fails the run. The first run finds no tables and builds everything from 24 October.
+`bluesky-marts.timer` starts `dbt build` at 04:30 UTC, after compaction and before the vacuum. It builds every model and runs every test; a failing test fails the run. Then `export-dashboard` writes the totals the [dashboard](dashboard.md) shows. The first run finds no tables and builds everything from 24 October.
 
 The SQL runs in Athena through the `dbt-athena` adapter, in the `bluesky_marts` Glue database, as Iceberg tables. dbt v2 doesn't support Athena, so this is dbt Core 1.12 ([D-036](../decisions/engineering-decisions.md#d-036-dbt-core-on-athena-for-the-marts)).
 

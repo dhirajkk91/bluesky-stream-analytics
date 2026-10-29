@@ -4,7 +4,7 @@
 
 The raw files keep every event exactly as Jetstream sent it, duplicates included, as JSON that has to be parsed on every query. The event store is the same log made usable: an Iceberg table in S3 with one row per distinct event and typed columns. It's append-only. A row is never removed, because an event that happened stays something that happened. The one exception to never changing a row is privacy: once a record is deleted, nightly [compaction](compaction.md) blanks what it pointed at in the events that created it ([D-034](../decisions/engineering-decisions.md#d-034-deleted-records-are-redacted-in-the-event-store)).
 
-Everything downstream reads the event store, not the raw files. The [projections](projections.md) (current posts, likes, follows, accounts) are built by replaying it, and so will the marts be, as described in the [end-to-end pipeline](end-to-end-pipeline.md#architecture).
+Everything downstream reads the event store, not the raw files. The [projections](projections.md) (current posts, likes, follows, accounts) are built by replaying it, and so are the [marts](marts.md), as described in the [end-to-end pipeline](end-to-end-pipeline.md#architecture).
 
 ## Goals and non-goals
 
@@ -14,11 +14,11 @@ Goals:
 - Safe to run again: loading the same files twice adds nothing.
 - Each run only touches the hours its events fall in, so the work per run stays the same as the table grows.
 - No post text or other record content, so a deleted post doesn't live on in the log.
+- An hour's events in the table within about 1.5 hours of happening.
 
 Non-goals:
 
 - Applying deletes. A delete is an event like any other and is appended. Removing the record it deletes is the job of the projections.
-- Near-real-time. Data lands within about 1.5 hours of happening.
 
 ## Design
 

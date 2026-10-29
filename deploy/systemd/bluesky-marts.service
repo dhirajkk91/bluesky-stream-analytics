@@ -1,5 +1,5 @@
 [Unit]
-Description=Build and test the marts with dbt, in Athena
+Description=Build and test the marts with dbt in Athena, then export the dashboard's numbers
 After=network-online.target
 Wants=network-online.target
 OnFailure=bluesky-alert@%n.service
@@ -12,6 +12,8 @@ WorkingDirectory=/var/lib/bluesky
 EnvironmentFile=/etc/bluesky/process.env
 EnvironmentFile=-/etc/bluesky/monitor.env
 ExecStart=/opt/bluesky-stream-analytics/.venv/bin/dbt build --project-dir /opt/bluesky-stream-analytics/transform --profiles-dir /opt/bluesky-stream-analytics/transform
+# Then the totals the public dashboard shows.
+ExecStart=/opt/bluesky-stream-analytics/.venv/bin/export-dashboard --bucket ${BUCKET}
 ExecStartPost=/opt/bluesky-stream-analytics/.venv/bin/ping-check bluesky-marts
 # The checkout is read-only to the service, so dbt writes its files here instead.
 Environment=DBT_TARGET_PATH=/var/lib/bluesky/dbt/target

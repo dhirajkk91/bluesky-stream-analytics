@@ -8,3 +8,5 @@ Every pull request and every push to `main` runs [`.github/workflows/ci.yml`](..
 | terraform | `terraform fmt -check`, then `terraform init -backend=false` and `terraform validate` on `infra/aws/` |
 
 `uv sync --locked` fails if `uv.lock` doesn't match `pyproject.toml`, so a dependency change can't be merged without its lock file.
+
+The other workflow, [`.github/workflows/dashboard.yml`](../../.github/workflows/dashboard.yml), isn't a check: it publishes the [dashboard](../architectures/dashboard.md) every morning and whenever `site/` changes on `main`. It's the only part of GitHub that reaches AWS, through a role that can read one file.
