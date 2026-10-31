@@ -2,7 +2,7 @@
 
 ## Purpose
 
-The [event store](event-store.md) says what happened: a like was created, then deleted. The projections say what's true now: which likes, posts, reposts, follows and blocks exist, at their latest version, with deleted ones gone. They're the read model the metrics and the dashboard will be built on, and like everything after the raw log, they can be thrown away and rebuilt from the store.
+The [event store](event-store.md) says what happened: a like was created, then deleted. The projections say what's true now: which likes, posts, reposts, follows and blocks exist, at their latest version, with deleted ones gone. They're the read model the metrics and the dashboard are built on, and like everything after the raw log, they can be thrown away and rebuilt from the store.
 
 ## Goals and non-goals
 
@@ -17,7 +17,7 @@ Non-goals:
 
 - Physically removing deleted rows every hour. That's nightly [compaction](compaction.md), which also sets the deadline by which deleted data leaves S3.
 - Record content. Like the store, there's no post text, only reply links and languages.
-- Removing the records of deleted accounts. That needs a pass over every record of an account; it's a later step.
+- Removing the records of deleted accounts. That needs a pass over every record of an account and isn't implemented: a deleted account's handles are removed, but its records remain.
 
 ## Design
 

@@ -1,5 +1,7 @@
 # Testing
 
+How each part of the pipeline was verified: the automated test suite, deliberate failure tests, and checks of the pipeline's output against independent counts on production data. Each section records what was run and what it showed.
+
 ## Automated tests
 
 `uv run pytest` runs everything below. None of it needs a network connection or an AWS account.
@@ -41,7 +43,7 @@ The real `collect` command ran against a fake server sending 20,000 events, and 
 
 The test was run again when reading and writing moved to separate threads ([D-028](../decisions/engineering-decisions.md#d-028-read-and-write-on-separate-threads)), with the same result: all 20,000 events saved, none missing.
 
-The first run of this test found a gap: with no cursor saved yet, the restart began from live and lost everything after the last event in the file. Recovery now reports the newest event it rescued and the collector resumes from there ([D-006](../decisions/engineering-decisions.md#d-006-resume-from-the-newer-of-the-cursor-and-the-recovered-data)).
+The first run of this test found a gap: with no cursor saved yet, the restart began from live and lost everything after the last event in the file. Recovery was changed to report the newest event it rescued, and the collector resumes from there ([D-006](../decisions/engineering-decisions.md#d-006-resume-from-the-newer-of-the-cursor-and-the-recovered-data)).
 
 ## First run on the real feed
 
@@ -114,11 +116,11 @@ The collector's log at the top of the hour on the server, before and after the c
 | Next hour's file started | 00:00:10 | 01:00:00 |
 | Previous hour's file finished | before the next one started | 01:00:09, after the next one started |
 
-Compressing the hour still takes about 9 seconds, but it now happens next to the stream instead of in front of it. The status line covering the change read 25,937 events in 61 s, 0.1 s behind live, in line with the minutes around it.
+Compressing the hour still takes about 9 seconds, but it happens next to the stream instead of in front of it. The status line covering the change read 25,937 events in 61 s, 0.1 s behind live, in line with the minutes around it.
 
 ## The event store on real data
 
-The first run of the event store job, then on Spark, loaded everything collected so far: the raw files for 21 hours, downloaded back from S3 with `fetch-raw`.
+The first run of the event store job, then on Spark, loaded everything collected up to then: the raw files for 21 hours, downloaded back from S3 with `fetch-raw`.
 
 | | |
 |---|---|
@@ -174,7 +176,7 @@ On the server, with one real hour (1,691,007 events, 239 MB compressed), two run
 | Output | 130 MB | 151 MB |
 | Events | 1,691,007 | 1,691,007 |
 
-Both outputs matched exactly, and the event count is the same one the hourly job added for that hour. This is why the job moved to DuckDB ([D-025](../decisions/engineering-decisions.md#d-025-duckdb-for-the-hourly-job)). The benchmark now compares the two outputs row for row, and they stay identical with the leaner columns of [D-026](../decisions/engineering-decisions.md#d-026-a-leaner-event-store).
+Both outputs matched exactly, and the event count is the same one the hourly job added for that hour. This is why the job moved to DuckDB ([D-025](../decisions/engineering-decisions.md#d-025-duckdb-for-the-hourly-job)). The benchmark compares the two outputs row for row, and they stay identical with the leaner columns of [D-026](../decisions/engineering-decisions.md#d-026-a-leaner-event-store).
 
 ## DuckDB writing to Glue
 
@@ -309,8 +311,8 @@ The saved `projections-vs-store` query then recounted, straight from the event s
 | Blocks | 638,973 | 0 | 7,291 | 0 |
 
 - **Every type matches**, 64.7 million records in all.
-- **Most deletes are of records created before collection started**: about 1.54 million, around 65% of all deletes so far. Follows show it most, 708 thousand unfollows against 4.1 million current follows, since follows are long-lived. Those deletes are the reason for markers ([D-031](../decisions/engineering-decisions.md#d-031-the-highest-rev-wins-and-deletes-leave-a-marker)): without one, a replayed create could bring the record back.
-- **Records with no creation time are almost all valid TIDs with impossible times.** 15,485 of the 15,490 have TID-shaped keys, but decode to the first seconds of 1970 or to centuries from now (2174 to 2540 in the examples checked). So some apps create keys from a counter or random bits rather than the clock. The other 5 aren't TIDs at all. My first guess, posts imported from other sites with their original dates, was wrong: those would decode to real past dates.
+- **Most deletes are of records created before collection started**: about 1.54 million, around 65% of all deletes at the time. Follows show it most, 708 thousand unfollows against 4.1 million current follows, since follows are long-lived. Those deletes are the reason for markers ([D-031](../decisions/engineering-decisions.md#d-031-the-highest-rev-wins-and-deletes-leave-a-marker)): without one, a replayed create could bring the record back.
+- **Records with no creation time are almost all valid TIDs with impossible times.** 15,485 of the 15,490 have TID-shaped keys, but decode to the first seconds of 1970 or to centuries from now (2174 to 2540 in the examples checked). So some apps create keys from a counter or random bits rather than the clock. The other 5 aren't TIDs at all. Posts imported from other sites with their original dates were ruled out: those would decode to real past dates.
 
 ## Compaction measured by hand
 
@@ -340,9 +342,9 @@ Before automating compaction, a throwaway script ran each step once in Athena ag
 
 The removals read the whole table even with only two hours of changes, about 9 GB for a 2.6 GB table. That's what made compaction tiered ([D-033](../decisions/engineering-decisions.md#d-033-compaction-is-tiered-by-record-type-and-age-to-fit-the-budget)).
 
-**A false alarm worth keeping.** Looking only at the second run, the numbers didn't add up: the store held the creates of 912,696 records that were later deleted, but `records` had held only 45,132 of them. It looked as if DuckDB had lost rows on the way in. Iceberg's own history of the table (`records$snapshots`) settled it in one query: every append had added exactly the rows its log line reported, and the missing rows had been removed by the first run, which I'd lost track of. The lesson: check a table's commit history before suspecting the writer.
+**A false alarm.** Looking only at the second run, the numbers didn't add up: the store held the creates of 912,696 records that were later deleted, but `records` had held only 45,132 of them. It looked as if DuckDB had lost rows on the way in. Iceberg's own history of the table (`records$snapshots`) settled it in one query: every append had added exactly the rows its log line reported, and the missing rows had been removed by the first run, which had been overlooked. Lesson: check a table's commit history before suspecting the writer.
 
-**How old records are when they're deleted.** Every delete marker carries the record's creation time decoded from its key, so this covers all 2,512,516 deletes so far, including those of records created before collection began:
+**How old records are when they're deleted.** Every delete marker carries the record's creation time decoded from its key, so this covers all 2,512,516 deletes at the time, including those of records created before collection began:
 
 | Age at delete | Deletes | Share |
 |---|---|---|
@@ -391,14 +393,18 @@ A new account gets its handle and its profile at almost the same moment, and an 
 
 The first marts build in Athena passed all of its tests, and its daily active writers matched the direct query above exactly: 1,253,076 on 25 October and 1,322,431 on the 26th. Its new accounts, 19,196 and 18,511, are the profiles created those days less the handful of accounts seen writing earlier. More in [marts](../architectures/marts.md#first-build).
 
-That build also showed a gap the sample data had hidden: `dim_account` had handles for 3 of 1.8 million accounts. Jetstream's identity events carry the handle in 28 of 74,610 cases, so handles are now looked up ([D-039](../decisions/engineering-decisions.md#d-039-handles-are-looked-up-not-read-from-the-feed)). The first lookup run found 72,319 of 83,466 accounts, and after a rebuild `dim_account` had handles for 71,673 accounts. More in [handle lookups](../architectures/handles.md#in-production).
+That build also showed a gap the sample data had hidden: `dim_account` had handles for 3 of 1.8 million accounts. Jetstream's identity events carry the handle in 28 of 74,610 cases, so handles are looked up ([D-039](../decisions/engineering-decisions.md#d-039-handles-are-looked-up-not-read-from-the-feed)). The first lookup run found 72,319 of 83,466 accounts, and after a rebuild `dim_account` had handles for 71,673 accounts. More in [handle lookups](../architectures/handles.md#in-production).
 
 ## Monitoring in production
 
 - **Healthy:** the first `check-health` run reported "newest event 1s old, 0 files to upload, 0 files to process, disk 7% used", and its ping reached healthchecks.io.
 - **A failure:** starting `bluesky-alert@bluesky-upload.service` by hand sent a fail ping with the last 40 lines of the upload log. The check went red, the email arrived with the log in it, and the next real upload turned it green with a recovery email.
-- **Every job:** each check turned green on its job's first run, except `bluesky-marts`, whose timer turned out never to have been enabled ([details](../architectures/monitoring.md#in-production)).
+- **Every job:** each check turned green on its job's first run, except `bluesky-marts`, whose timer had never been enabled ([details](../architectures/monitoring.md#in-production)).
 
 ## The dashboard in production
 
-The first publish failed twice. The first time, the workflow couldn't find its two settings, so it never asked AWS for anything. The second time AWS refused the token: the trust policy expected the repository as `dhirajkk91/bluesky-stream-analytics`, but GitHub's tokens name it with numeric IDs too, `dhirajkk91@72024303/bluesky-stream-analytics@1426294014`. CloudTrail logs every refused attempt with the token's subject, which is how the real value turned up. The policy now matches it exactly. Once live, the page said deletes stayed visible for 538 minutes on average, with a longest of 3,320. The average had included the 34 runs that rebuilt the projections back to back, each folding deletes from up to two days earlier. Leaving out runs that start within 30 minutes of the one before brought it back to what the scheduled runs show: 80 minutes, and 141 when an hour's file missed its run.
+Three issues surfaced when the report first went live, each fixed before it was announced:
+
+- **The workflow couldn't reach AWS.** Its two repository variables weren't where it reads them, so it never requested credentials.
+- **AWS refused GitHub's token.** The trust policy expected the repository as `dhirajkk91/bluesky-stream-analytics`, but GitHub's tokens name it with numeric IDs as well: `dhirajkk91@72024303/bluesky-stream-analytics@1426294014`. CloudTrail logs every refused attempt with the token's subject, which showed the real value, and the trust policy was changed to match it exactly.
+- **The delete figure was wrong.** The page said deletes stayed visible for 538 minutes on average, with a longest of 3,320. The average had included the 34 runs that rebuilt the projections back to back, each folding deletes from up to two days earlier. Leaving out runs that start within 30 minutes of the one before gives what the scheduled runs show: 80 minutes, and 141 when an hour's file missed its run.

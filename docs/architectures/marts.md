@@ -175,4 +175,4 @@ A third of all likes, reposts and replies go to posts less than an hour old, and
 
 ## Cost
 
-A nightly build reads the last two days of the event store's commit columns and the marts themselves, around 1 to 2 GB, so about a cent. To be measured on the first runs.
+A nightly build reads the last two days of the event store's commit columns and the marts themselves, around 1 to 2 GB, so about a cent a night.
