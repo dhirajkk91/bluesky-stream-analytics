@@ -2,7 +2,7 @@
 
 ## Purpose
 
-Without monitoring, the only way to know something has broken is to go and look. The Jetstream stall on 27 October ([incident](../validation/incidents.md#jetstream-went-quiet-for-15-minutes-27-october)) only turned up because I happened to read the collector's log. Monitoring means an email when something breaks, and another when it's fixed.
+Without monitoring, the only way to know something has broken is to go and look. The Jetstream stall on 27 October ([incident](../validation/incidents.md#jetstream-went-quiet-for-15-minutes-27-october)) was only noticed afterwards, in the collector's log. Monitoring means an email when something breaks, and another when it's fixed.
 
 ## Goals and non-goals
 
@@ -110,11 +110,11 @@ Anything that cost data or broke a stated promise goes into [incidents](../valid
 
 After the units went in, `bluesky-check` and `bluesky-upload` reported within minutes, and `bluesky-process`, compaction and the vacuum on their first runs. A fake failure, `systemctl start bluesky-alert@bluesky-upload.service`, turned the check red and sent an email within seconds, with the last 40 lines of the upload log in it. The next upload turned it green again and sent a recovery email.
 
-**The first find came the next morning.** `bluesky-marts` was still grey: its timer had never been enabled when the marts were deployed. The unit file was copied and the build was run by hand twice, but nothing ever started it at 04:30, so for two nights there was no nightly build. Nothing was lost, since each build redoes the last two days, but nothing would have told me either. Enabling the timer and running the build turned the check green.
+**The first finding came on its first day.** `bluesky-marts` was still grey: its timer had never been enabled when the marts were deployed. The unit file was copied and the build was run by hand twice, but nothing ever started it at 04:30, so for two nights there was no nightly build. Nothing was lost, since each build redoes the last two days, but without monitoring nothing would have flagged it. Enabling the timer and running the build turned the check green.
 
 ## Limits
 
-- **Only total stalls are caught.** If Jetstream kept sending events but fewer of them, the newest event would still be fresh. A check on events per hour against the usual 850,000 or so would catch it, once there's enough history to say what usual is.
+- **Only total stalls are caught.** If Jetstream kept sending events but fewer of them, the newest event would still be fresh. A check on events per hour would catch it, but what's usual swings from about 0.8 to 2 million an hour with the time of day, so it needs a few weeks of history to say what usual is for each hour.
 - **If healthchecks.io itself is down, there are no alerts.** Jobs carry on as normal, since a ping never fails a job.
 - **A check that has never been pinged doesn't alert.** healthchecks.io only starts expecting pings after the first one, so a job that never runs at all stays grey, not red. That's how the marts timer above went unnoticed until someone looked. A new check should be watched until it turns green once.
 - **The processing backlog check is late by design.** Two hours means one missed hourly run doesn't alert, since a failed run already has.

@@ -37,7 +37,7 @@ The burst holds the missing minutes' worth of events. They're stamped 08:14 and 
 
 **What changed.**
 
-- There's now [monitoring](../architectures/monitoring.md): an email when the newest event is more than 5 minutes old, so a stall like this one is noticed while it happens.
+- [Monitoring](../architectures/monitoring.md) was added: an email when the newest event is more than 5 minutes old, so a stall like this one is noticed while it happens.
 - `event_time` is documented as Jetstream's processing time, which can lag the real time during an outage like this one.
-- The deletion policy now gives the measured time to hide a deleted record, and says when it can be longer.
+- The deletion policy states the measured time to hide a deleted record, and when it can be longer.
 - Nothing in the collector. Reconnecting after a silence would only have reached the same stalled server, and switching servers isn't possible without a gap, because cursors don't line up between them. Spotting a silence quickly is left to monitoring, above.

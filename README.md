@@ -1,105 +1,150 @@
-# bluesky-stream-analytics
+# Bluesky Stream Analytics
 
-## What I'm building
+[![CI](https://github.com/dhirajkk91/bluesky-stream-analytics/actions/workflows/ci.yml/badge.svg)](https://github.com/dhirajkk91/bluesky-stream-analytics/actions/workflows/ci.yml)
+[![Dashboard](https://github.com/dhirajkk91/bluesky-stream-analytics/actions/workflows/dashboard.yml/badge.svg)](https://github.com/dhirajkk91/bluesky-stream-analytics/actions/workflows/dashboard.yml)
 
-Bluesky has a public live feed called Jetstream. It streams pretty much everything public happening on the network as it happens: posts, likes, reposts, follows, profile changes, deletes. No login needed to read it.
+A data pipeline that collects every public write on Bluesky around the clock, keeps each event exactly once in an Iceberg event store, honors deletes on a stated schedule, and models the result as a Kimball star schema of product metrics. The metrics are published every morning as a public report.
 
-The goal is to collect that feed nonstop and turn it into the kind of numbers a product team would actually look at, then put them on a simple public page anyone can open.
+**Live report: [dhirajkk91.github.io/bluesky-stream-analytics](https://dhirajkk91.github.io/bluesky-stream-analytics/)**
 
-Questions I want to be able to answer:
+<img src="docs/images/dashboard.png" alt="The public report: the day's active accounts as the headline, then each finding with its chart" width="420">
 
-- How many people are active on Bluesky each day, week and month?
-- Of the accounts that showed up this week, how many are still around a day later? A week? A month?
-- Are a small number of accounts getting most of the likes and reposts, or is it spread out?
-- What's trending right now, and how fast do things rise and fade?
-- What does a new account do in its first few days that makes it more likely to stick around?
+## Key findings
 
-## Why this
+From the first week of data. The live report keeps them current.
 
-I wanted to work with a live stream that never stops, not a dataset that just sits there. And this feed is messy in interesting ways:
+- **About 1.3 million accounts write something on Bluesky each day**, and about 20,000 new accounts appear.
+- **Engagement is concentrated.** The top 1% of the accounts that receive any likes, reposts or replies receive half of them. The Gini coefficient of engagement received is 0.88.
+- **Attention is short.** A third of a day's engagement goes to posts less than an hour old, and half to posts under three hours old.
+- **Most new accounts don't return.** About one in five writes anything the day after it appears.
 
-- the same event can show up twice
-- things can arrive out of order, so a reply might show up before the post it's replying to
-- there's no easy way to tell if you missed something
-- people delete stuff, and I need to respect that
+## Architecture
 
-Getting correct numbers out of all that is the part I'm most curious about.
+```mermaid
+flowchart LR
+    J["Jetstream<br/>Bluesky's public stream"] --> C["Collector<br/>24/7, Oracle Cloud"]
+    C --> R[("Raw log<br/>hourly files in S3")]
+    R --> E[("Event store<br/>Iceberg, each event once")]
+    E --> P[("Projections<br/>current state,<br/>deletes applied")]
+    E --> M[("Marts<br/>dbt star schema")]
+    P --> M
+    M --> D["Public report<br/>GitHub Pages"]
+```
 
-## Where it's at
+The source is a stream of changes, so the pipeline is event-sourced rather than organized as bronze, silver and gold layers. The event log is the source of truth, and every other table is derived from it and can be rebuilt by replaying it ([why](docs/decisions/engineering-decisions.md#d-018-event-sourced-not-medallion)).
 
-So far I've got a collector that connects to the feed, saves every event to hourly compressed files, and remembers where it left off. I can kill it in the middle of a run, restart it, and nothing goes missing. I tested that by killing it on purpose: 20,000 events sent, all 20,000 saved. That test also caught a bug where a crash in the first few seconds left a gap, which is fixed now.
+| Layer | What it holds | How it changes | Built with |
+|---|---|---|---|
+| Raw log | Every event as received, duplicates included | Appended continuously, expires after 14 days | Python (asyncio), S3 |
+| Event store | Each distinct event once, typed, no post text | Appended hourly; rewritten only to redact deleted records | DuckDB, Apache Iceberg, AWS Glue |
+| Projections | What exists now: posts, likes, reposts, follows and blocks | New versions and delete markers appended hourly, compacted nightly | DuckDB, Iceberg, Athena |
+| Marts | Facts and dimensions for product metrics, including account history (SCD type 2) | The last two days rebuilt nightly | dbt on Athena |
+| Public report | Totals only, with small groups suppressed | Exported nightly, published each morning | GitHub Actions, GitHub Pages, Observable Plot |
 
-First look at the real feed: around 475 events a second, about two thirds of them likes, and the files shrink about 4x when compressed.
+## Engineering highlights
 
-It now runs around the clock on a free Oracle Cloud ARM server, as a systemd service that comes back on its own after a crash or a reboot. I rebooted the server on purpose to check: it picked up 5 seconds before where it stopped and caught up on the missed minute within the next one. Every 10 minutes, finished hourly files get uploaded to S3 by an AWS user that's only allowed to upload, and the AWS side (bucket, permissions, budget alert) is set up with Terraform. Tests and Terraform checks run on every pull request.
+- **No lost events across crashes and reboots.** The collector syncs to disk before saving its position, and resumes slightly before it after a restart. In a kill test, 20,000 events were sent with the process killed mid-run, and all 20,000 were saved. A deliberate server reboot resumed and caught up within a minute ([collector](docs/architectures/collector.md)).
+- **Exactly-once event store.** Each hour is deduplicated on load and merged only into the hours its events fall in, so reloading the same files adds nothing. A check against the raw files matches hour by hour ([event store](docs/architectures/event-store.md)).
+- **Engine chosen by measurement.** The hourly job was first written in Spark. On a real hour, DuckDB produced identical output in 11 seconds against Spark's 82, so the job runs on DuckDB ([benchmark](docs/decisions/engineering-decisions.md#d-025-duckdb-for-the-hourly-job)). Column profiling then cut the table from 77 bytes per event to 31.
+- **Order-independent current state.** Projections are folded incrementally from new Iceberg commits. The highest revision wins and deletes leave markers, so replayed and out-of-order events give the same answer. A full recount from the event store matched every record type exactly ([projections](docs/architectures/projections.md)).
+- **Deletes honored on a schedule, within budget.** A deleted record is hidden from every query in about 80 minutes and physically removed from S3 on tiered deadlines. The tiers come from measuring how old records are when they're deleted, which brings the projected compaction cost to about $2 a month at six months of data, against about $25 for a full nightly pass ([deletion policy](docs/architectures/compaction.md)).
+- **Kimball modeling with late and missing data.** An SCD type 2 account dimension, inferred-member placeholders for replies to posts that were never seen, and incremental facts that rebuild a two-day window for late events. 14 models and 32 data tests run on every build ([marts](docs/architectures/marts.md)).
+- **No long-lived keys outside the server.** The publishing workflow reaches AWS through GitHub's OIDC provider, with a role that can read a single file, and nothing on AWS is public ([report](docs/architectures/dashboard.md)).
+- **Monitoring that has already paid off.** Every job reports to an external dead man's switch, failures email the end of their log, and a health check watches for a stalled stream, backlogs and disk space. On its first day it found a nightly job that had never been scheduled ([monitoring](docs/architectures/monitoring.md)).
+- **Tested at every layer.** 149 automated tests, including a fake Jetstream server, a fake S3, slow-disk simulations, and the dbt models built on DuckDB against hand-computed results. Every pull request also validates the Terraform ([testing](docs/validation/testing.md)).
 
-The data in S3 can now be queried with SQL in Athena, straight from the files, with partitions picked up automatically and a cap on what any query can cost. The first checks found no missing minutes, and the only duplicates lined up exactly with a reboot and two dropped connections, which is what the collector is designed to do.
+## In numbers
 
-The design is event-sourced rather than the usual bronze/silver/gold: the feed is a log of things that happened, so the log is the source of truth and everything else (current state, metrics) is derived from it and can be rebuilt by replaying it. [Here's why](docs/architectures/end-to-end-pipeline.md#architecture).
+| | |
+|---|---|
+| Accounts writing something each day | about 1.3 million |
+| Writes per day (posts, likes, reposts, follows, blocks, deletes) | about 32 million |
+| Time until a deleted record is hidden | about 80 minutes on average |
+| Event store size per event | 31 bytes |
+| Infrastructure | one Oracle Cloud Always Free server, and AWS within a $10 monthly budget |
+| Automated tests | 149 |
 
-The event store is done: an hourly job on the same server appends each finished hour to an Iceberg table in S3, with every event exactly once and no post text. Raw files now expire after 14 days, partly to save money, but mostly because they hold text people may have deleted.
+## Tech stack
 
-I built the job in Spark first, then ran the same work through DuckDB on a real hour: identical output, 11 seconds instead of 82. So it runs on DuckDB now, and each hour loads in 10 to 16 seconds. [The decision log](docs/decisions/engineering-decisions.md#d-025-duckdb-for-the-hourly-job) has the numbers. Measuring the table's columns also showed one unused hash was 42% of its size, so that's gone too, and the table went from 77 bytes an event to 31.
+| Area | Tools |
+|---|---|
+| Ingestion | Python 3.14, asyncio, websockets, zstd |
+| Storage | Amazon S3, Apache Iceberg, AWS Glue Data Catalog |
+| Processing | DuckDB (hourly), Amazon Athena (nightly); Spark benchmarked |
+| Modeling | dbt Core with dbt-athena; dbt-duckdb in CI |
+| Infrastructure | Terraform, Oracle Cloud, systemd |
+| Delivery and operations | GitHub Actions (CI, Pages, OIDC), healthchecks.io |
+| Report | HTML, CSS, Observable Plot |
 
-The projections are up too: what exists right now, with deletes applied, so 64.7 million current likes, posts, reposts, follows and blocks. Every hour, right after the event store load, a job reads only the new commits and appends new versions and delete markers, in about 15 seconds. A view picks each record's latest version, so folding the same events twice or out of order gives the same answer. A recount straight from the event store matched for every record type, to the record. It also showed that about two thirds of deletes are of things created before I started collecting, which is why a delete leaves a marker instead of just removing a row. [How it works](docs/architectures/projections.md).
+## Data principles
 
-Deletes are now real deletes, on a schedule. Every night a job in Athena blanks what a deleted record pointed at in the event store, removes deleted and outdated rows from the projections, and rewrites the files, and a vacuum two hours later deletes the old files from S3. Doing all of that over everything every night would have passed $25 a month within three months, so I measured how old records are when they're deleted (over a third are under a day old) and tiered it: recent days nightly, everything weekly or monthly depending on the record type. [The deletion policy and why](docs/architectures/compaction.md). There's also an [incidents log](docs/validation/incidents.md), starting with the morning Jetstream went quiet for 15 minutes.
+- Only public data is collected, and the project never interacts with anyone on the network.
+- Only totals are published. Nothing about an individual account or post leaves the pipeline, and groups smaller than 100 are folded into "other" or left out.
+- Deletes are honored. A deleted record is hidden from everything within about 2 hours, and physically removed within 2 days if it was deleted soon after being created, otherwise within 8 days (posts and reposts) or 32 days (likes, follows and blocks) ([why it's tiered](docs/architectures/compaction.md#why-its-tiered)).
+- Post text exists only in the raw log, which expires after 14 days.
 
-The metrics have started. A dbt project builds a star schema in Athena every night: about 1.3 million accounts write something on Bluesky each day, and about 19,000 new ones sign up. Half of all likes, reposts and replies go to the top 1% of the accounts that receive any, and about one new account in five writes anything the next day. Attention is also short: a third of all engagement goes to posts less than an hour old, and half to posts under three hours old. Along the way, two surprises: Jetstream's identity events don't actually say what an account's new handle is, so a job now looks handles up through Bluesky's API; and replies often answer posts I never saw (30% on the first day, 3% by the fourth), so those parents get placeholder rows until (if ever) they turn up. [The marts, and how each metric is defined](docs/architectures/marts.md).
+## Schedule
 
-Monitoring is live. Every job pings [healthchecks.io](https://healthchecks.io) when it works, a failed one sends the end of its log, and a check every 10 minutes watches for a stalled stream, files piling up and a full disk. Since healthchecks.io expects the pings, a server that's down gets noticed too, and I get an email either way. Its first find, the next morning: the nightly marts build had never been scheduled, and had only ever run when I started it by hand. [How it works](docs/architectures/monitoring.md).
+| When (UTC) | Job | What it does |
+|---|---|---|
+| Continuously | `collect` | Reads Jetstream and writes hourly files |
+| Every 10 minutes | `upload` | Uploads finished hourly files to S3 |
+| Every 10 minutes | `check-health` | Checks the newest event, backlogs and disk space |
+| Hourly at :20 | `process`, `project`, `resolve-handles` | Loads the event store, folds the projections, looks up changed handles |
+| 03:45 | `compact` | Redacts deleted records and compacts the tables |
+| 04:30 | `dbt build`, `export-dashboard` | Builds and tests the marts, exports the report's numbers |
+| 05:45 | `compact --vacuum` | Removes the files compaction replaced |
+| 06:17 | Dashboard workflow | Publishes the report |
 
-And the numbers are public now: [dhirajkk91.github.io/bluesky-stream-analytics](https://dhirajkk91.github.io/bluesky-stream-analytics/). It's one page that reads like a short report. Each heading is a finding worked out from the data, so it stays true as the numbers move, and the caveats sit in the margin next to the chart they're about. After the nightly marts build, the server exports the totals to one small file, and a GitHub Actions workflow bakes it into the page every morning. The workflow gets AWS access for a few minutes at a time through GitHub's OIDC provider, so there's no AWS key in GitHub and nothing on AWS is public. [How it works](docs/architectures/dashboard.md).
+## Repository layout
 
-## The plan
-
-1. ~~Connect to the feed and watch events come in~~ 
-2. ~~Save every event without losing anything if it crashes~~ 
-3. ~~Run it 24/7 in the cloud, with files going to S3~~
-4. ~~Make the saved data queryable with SQL~~
-5. ~~Turn the log into proper tables: an event store with each event once, then projections of current state with deletes applied~~
-6. Compact the projections nightly, so deleted records are physically gone by a stated deadline (built, being measured)
-7. ~~Build the product metrics on top, as a star schema~~
-8. ~~Add monitoring so I know when something breaks~~
-9. ~~Put up the public dashboard~~
-
-This will probably change as I learn more.
-
-## Ground rules
-
-- Only public data, and I never interact with anyone on the network.
-- Nothing about individual people gets published, only totals.
-- If someone deletes something, I delete it too. It's hidden from everything within about 2 hours, and physically gone within 2 days if it was deleted soon after being made, and within 8 days (posts) or 32 days (likes, follows, blocks) whatever its age. [Why it's tiered](docs/architectures/compaction.md#why-its-tiered).
-- Costs stay tiny: free tiers and a small budget.
+```
+src/bluesky_stream_analytics/   collector, uploader, event store, projections, compaction, handle lookups, export, monitoring
+transform/                      dbt project: staging, intermediate and mart models, tests, portable macros
+sql/                            Athena views and data checks
+site/                           the public report
+infra/aws/                      Terraform for S3, IAM, Glue, Athena, the budget and the OIDC role
+deploy/                         systemd units and environment file templates
+benchmarks/                     Spark against DuckDB
+tests/                          automated tests
+docs/                           architecture, decisions, validation
+```
 
 ## Running it
 
-You'll need [uv](https://docs.astral.sh/uv/).
+Requires [uv](https://docs.astral.sh/uv/).
 
 ```bash
+uv run pytest                     # run the tests
 uv run watch                      # live summary of the stream every 10 seconds, nothing saved
 uv run collect                    # save every event under ./data
 uv run upload --bucket <bucket>   # copy finished hourly files to S3
-uv run pytest                     # run the tests
 ```
 
 ```bash
-uv run process --catalog local --database events.duckdb      # append data/uploaded/ to a local DuckDB table
+uv run process --catalog local --database events.duckdb      # load data/uploaded/ into a local DuckDB table
 uv run process --warehouse s3://<bucket>/warehouse           # the same, into the Iceberg table in Glue
 uv run fetch-raw --bucket <bucket> --date 2026-10-24         # download a day of raw files to load again
 uv run project --warehouse s3://<bucket>/warehouse           # fold new event-store commits into the projections
-uv run compact --warehouse s3://<bucket>/warehouse           # tonight's compaction and redaction, in Athena
+uv run compact --warehouse s3://<bucket>/warehouse           # the night's compaction and redaction, in Athena
 uv run resolve-handles --warehouse s3://<bucket>/warehouse   # look up handles for new identity changes
 uv run dbt build --project-dir transform --profiles-dir transform   # build and test the marts in Athena (needs BUCKET)
-uv run export-dashboard --out site/data/dashboard.json      # the dashboard's numbers, from the marts
-uv run python -m http.server -d site 8000                   # then the page at localhost:8000
+uv run export-dashboard --out site/data/dashboard.json      # the report's numbers, from the marts
+uv run python -m http.server -d site 8000                   # then the report at localhost:8000
 uv run check-health --data-dir /var/lib/bluesky             # what the 10-minute health check sees
 uv run --group bench python benchmarks/compare_engines.py <raw files>   # Spark against DuckDB, needs Java 17 or 21
 ```
 
-The AWS setup lives in `infra/aws/` as Terraform. The SQL in `sql/` gets saved into Athena by Terraform: open the Athena query editor, pick the `bluesky-stream-analytics` workgroup, run `create-events-view` once, then any of the checks.
+The AWS resources are defined in `infra/aws/`. Terraform also saves the SQL in `sql/` as named queries in the `bluesky-stream-analytics` Athena workgroup.
 
-## More detail
+## Roadmap
+
+- **Orchestration with Airflow.** Run the hourly and nightly jobs as DAGs, so each waits for the one before it instead of starting at a fixed time, with retries and backfills.
+- **A real-time path with Kafka.** Publish the stream to a topic, with a consumer counting trending hashtags and languages minute by minute alongside the nightly batch.
+- **Containers.** Package every job as a Docker image.
+- **The first month's analysis,** once day-30 retention is available.
+
+## Documentation
 
 **Architecture**
 - [End-to-end pipeline](docs/architectures/end-to-end-pipeline.md): how the pieces fit together
@@ -108,17 +153,17 @@ The AWS setup lives in `infra/aws/` as Terraform. The SQL in `sql/` gets saved i
 - [Event store](docs/architectures/event-store.md): the hourly job and the table with every event once
 - [Projections](docs/architectures/projections.md): current posts, likes, reposts, follows and blocks, with deletes applied
 - [Compaction](docs/architectures/compaction.md): the deletion policy, and the nightly job that keeps it
-- [Handle lookups](docs/architectures/handles.md): asking Bluesky's API for handles, since the feed doesn't carry them
+- [Handle lookups](docs/architectures/handles.md): resolving handles through Bluesky's API, since the feed doesn't carry them
 - [Marts](docs/architectures/marts.md): the star schema, and how each metric is defined
-- [Dashboard](docs/architectures/dashboard.md): the public page
-- [Monitoring](docs/architectures/monitoring.md): email alerts when something breaks
+- [Dashboard](docs/architectures/dashboard.md): the public report
+- [Monitoring](docs/architectures/monitoring.md): alerts when something breaks
 - [Query layer](docs/architectures/query-layer.md): SQL with Athena
-- [Infrastructure](docs/architectures/infrastructure.md): the Oracle server and the AWS side
+- [Infrastructure](docs/architectures/infrastructure.md): the Oracle server and the AWS resources
 
 **Decisions**
-- [Engineering decisions](docs/decisions/engineering-decisions.md): why I built it this way
+- [Engineering decisions](docs/decisions/engineering-decisions.md): the reasoning behind each design choice, with the alternatives rejected
 
 **Validation**
-- [Testing](docs/validation/testing.md): tests, the kill test, real runs on the server, Spark against DuckDB, and a pattern in connection drops
+- [Testing](docs/validation/testing.md): automated tests, the kill test, production runs and data checks
 - [CI](docs/validation/ci.md)
 - [Incidents](docs/validation/incidents.md): what went wrong in production, and what changed because of it

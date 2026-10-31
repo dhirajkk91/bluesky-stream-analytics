@@ -1,10 +1,12 @@
-# Decisions
+# Engineering decisions
+
+Each entry records a design decision, the reasoning behind it, and its cost or the alternatives rejected. Entries are numbered in the order they were made. A superseded decision stays in the log, marked with what replaced it, because the measurement that replaced it is part of the reasoning.
 
 ## D-001: Store raw events exactly as received
 
 The collector doesn't clean, reshape or filter anything. It reads `time_us` to know which file the event goes in, and writes the original text.
 
-**Why:** if code further down the pipeline has a bug, I can rebuild everything from the raw files. If the collector transformed events and got it wrong, that data would be gone.
+**Why:** if code further down the pipeline has a bug, everything can be rebuilt from the raw files. If the collector transformed events and got it wrong, that data would be gone.
 
 **Cost:** raw JSON is bigger than a cleaned-up format. Compression helps (D-002).
 
@@ -15,7 +17,7 @@ The collector doesn't clean, reshape or filter anything. It reads `time_us` to k
 - **zstd.** It's built into Python 3.14, so no extra dependency, and Athena can read zstd-compressed text.
 - **Uncompressed while the hour is in progress, compressed once it's done.** If the active file were compressed, a crash could leave a broken compressed stream that's hard to read back. With plain text, a crash can only damage the last line, and recovery just cuts that line off.
 
-**Alternative I didn't take:** Parquet straight away. It's much better for querying, but you can't append to it one event at a time, and it would mean buffering in memory. That belongs in a later step that converts raw files into proper tables.
+**Rejected:** Parquet from the start. It's much better for querying, but it can't be appended to one event at a time, and it would mean buffering in memory. Converting to a columnar format belongs to the event store ([D-021](#d-021-hourly-insert-only-appends-limited-to-the-batchs-time-range)).
 
 ## D-003: Save the cursor only after the data is on disk
 
@@ -31,7 +33,7 @@ The cursor file itself is written to a temp file and renamed into place, so it's
 
 Whenever the collector connects with a resume point, it asks for events starting 5 seconds earlier.
 
-**Why:** the switch from replaying old events to live ones isn't perfectly clean on Jetstream's side, and my cursor can be a few seconds behind what was actually written. Overlapping a little means no gaps.
+**Why:** the switch from replaying old events to live ones isn't perfectly clean on Jetstream's side, and the saved cursor can be a few seconds behind what was actually written. Overlapping a little means no gaps.
 
 **Cost:** duplicates on every reconnect or restart. They're cheap to remove later, because events carry enough identifying fields to spot repeats. A gap can't be fixed later.
 
@@ -41,13 +43,13 @@ The collector always uses `jetstream2.us-east.bsky.network`.
 
 **Why:** each Jetstream server stamps `time_us` itself, so the same event has slightly different timestamps on different servers. A cursor saved from one server doesn't resume cleanly on another.
 
-**Cost:** if that server is down, the collector waits and retries instead of failing over. Switching servers would need a bigger rewind and more duplicates. I'll handle that if it actually happens.
+**Cost:** if that server is down, the collector waits and retries instead of failing over. Switching servers would need a bigger rewind and more duplicates. Failover isn't implemented: in the one stall seen in production, the problem was upstream and cleared on its own within 15 minutes, with no sign of lost events ([incident](../validation/incidents.md#jetstream-went-quiet-for-15-minutes-27-october)).
 
 ## D-006: Resume from the newer of the cursor and the recovered data
 
-**Found by testing:** I killed the collector 3 seconds after it started, before its first cursor save. On restart there was no cursor, so it started from live, and everything after the last event in the file was lost.
+**Found by testing:** a kill test stopped the collector 3 seconds after it started, before its first cursor save. On restart there was no cursor, so it started from live, and everything after the last event in the file was lost.
 
-**Fix:** crash recovery now reports the newest `time_us` it found in the files it rescued. The collector resumes from whichever is newer: that, or the saved cursor. It's safe because recovery syncs those files to disk before they're used.
+**Fix:** crash recovery reports the newest `time_us` it found in the files it rescued. The collector resumes from whichever is newer: that, or the saved cursor. It's safe because recovery syncs those files to disk before they're used.
 
 ## D-007: Reconnect with exponential backoff and jitter
 
@@ -79,9 +81,9 @@ The IAM user on the server has one permission: `s3:PutObject` under `raw/`. It c
 
 Its access key is created by hand, not in Terraform, so the secret never ends up in the Terraform state file.
 
-## D-011: Terraform state stays local for now
+## D-011: Terraform state stays local
 
-The state file lives on my laptop and is ignored by git. With one person and a handful of resources, a remote backend adds setup without solving a real problem yet. It moves to S3 if the infrastructure grows or CI starts applying changes.
+The state file lives on the machine that runs Terraform and is ignored by git. With one operator and a small set of resources, a remote backend adds setup without solving a real problem. It moves to S3 with locking if more people or CI start applying changes.
 
 ## D-012: systemd, not Docker, on the server
 
@@ -89,7 +91,7 @@ The collector and uploader run as plain systemd units from a git checkout.
 
 **Why:** there's one Python app with one dependency file. systemd already handles what's needed: start on boot, restart on crash, a clean `SIGTERM` on stop, a schedule for the uploader, and logs. Docker would add an image build and a registry without solving anything yet.
 
-**Revisit when:** several services have to run side by side, like a streaming broker or monitoring.
+**Revisit when:** several services have to run side by side, such as a streaming broker.
 
 ## D-013: The uploader's key lives in a root-only file read by systemd
 
@@ -101,7 +103,7 @@ The collector and uploader run as plain systemd units from a git checkout.
 
 **Why:** Bluesky records are deeply nested and change as Bluesky and other apps add fields. A fixed schema at this layer would fail or silently drop fields when that happens. Keeping the line as-is matches D-001: the raw layer is exactly the files.
 
-**Cost:** every query parses JSON, which is slower than reading typed columns. Fine for exploring; metrics will be built on typed tables.
+**Cost:** every query parses JSON, which is slower than reading typed columns. Fine for exploring; the metrics are built on the typed event store instead.
 
 ## D-015: Partition projection instead of a crawler
 
@@ -147,7 +149,7 @@ Reads and writes are split in the CQRS sense: the store is shaped for appending,
 
 The job that loads the event store is PySpark running on the Oracle server in local mode (one machine, every core), started by a systemd timer.
 
-**Honestly:** this data doesn't need Spark. An hour is about 1.5 million events, roughly 1 GB of JSON, and DuckDB or Polars on one machine would handle it. I picked Spark because the compute is free on the server, it writes Iceberg tables with `MERGE` well, and the same job would run on a cluster (EMR, Glue) unchanged if the volume grew 100 times.
+**Context:** this data doesn't need Spark. An hour is about 1.5 million events, roughly 1 GB of JSON, and DuckDB or Polars on one machine would handle it. Spark was chosen because the compute is free on the server, it writes Iceberg tables with `MERGE` well, and the same job would run on a cluster (EMR, Glue) unchanged if the volume grew 100 times.
 
 **Alternatives:**
 
@@ -180,7 +182,7 @@ Every hour the job loads whatever the uploader has handed over, drops the events
 
 - **Insert-only** because an event never changes once it's sent. A repeat is the same event delivered again, so there's nothing to update.
 - **Limited to the batch's range** so only the table files that could hold a match are read: the hour being loaded, plus the previous one after a restart's rewind. That keeps each run the same size however big the table gets.
-- **Hourly rather than daily:** both cost the same, since the compute is free and the reads are the same in total. Hourly keeps data about 1.5 hours fresh instead of up to 2 days, and keeps a failed run's impact to one hour. Daily metrics in later layers will run daily.
+- **Hourly rather than daily:** both cost the same, since the compute is free and the reads are the same in total. Hourly keeps data about 1.5 hours fresh instead of up to 2 days, and keeps a failed run's impact to one hour. The daily metrics are built nightly, in the marts.
 
 Loading the same files twice adds nothing, so a crash at any point is fixed by running again.
 
@@ -206,7 +208,7 @@ An S3 lifecycle rule deletes `raw/` files after 14 days.
 
 The events table keeps what metrics need (who, when, what kind, aimed at whom, reply links, languages) and none of the record content: no post text, no profile text, no images or links.
 
-**Why:** content that's deleted on Bluesky would otherwise live on in an append-only log kept for months, where it can't be removed without breaking the log's rule. Nothing planned needs it. Trending topics can come from hashtags, which can be added as their own column when that step comes.
+**Why:** content that's deleted on Bluesky would otherwise live on in an append-only log kept for months, where it can't be removed without breaking the log's rule. No metric needs it. Trending topics can be counted from hashtags, which can be added as a column of their own.
 
 ## D-025: DuckDB for the hourly job
 
@@ -221,7 +223,7 @@ The hourly job that loads the event store runs on DuckDB instead of Spark. It wr
 **What it gives up:**
 
 - Glue support in DuckDB's Iceberg extension is marked experimental. The job fails loudly if a write fails, and nothing local is deleted until a commit succeeds, so a failure costs a retry, not data.
-- DuckDB writes deletes as small delete files (merge-on-read) rather than rewriting data files. That matters for the projections, which will need regular compaction.
+- DuckDB writes deletes as small delete files (merge-on-read) rather than rewriting data files. That matters for the projections, which therefore need regular compaction ([D-033](#d-033-compaction-is-tiered-by-record-type-and-age-to-fit-the-budget)).
 - DuckDB doesn't run Iceberg table maintenance (compacting files, expiring old snapshots). Athena's `OPTIMIZE` and `VACUUM` can.
 
 **Spark isn't gone.** `benchmarks/spark_transform.py` keeps the Spark version, and the benchmark checks the two produce identical rows. If a job ever outgrows one machine (recomputing months of history, for example), that's where Spark comes back, on a cluster started only for that job.
@@ -246,9 +248,9 @@ Three changes to the event store's columns, measured from Iceberg's own per-colu
 
 **Found in production:** Jetstream dropped the collector's connection about 14 times an hour during long, heavy jobs on the server, and about once every 9 hours otherwise ([details](../validation/testing.md#connection-drops-and-heavy-jobs)). The collector synced its file to disk every 5 seconds on its main loop. When another job keeps the disk busy, one sync can take seconds, and while it waits nothing reads from the connection.
 
-**Fix:** the main loop now only hands the buffered events to the operating system, which is quick, and a single background thread runs the `fsync` and then saves the cursor. Events keep being read and written while it runs. The cursor still only moves once the `fsync` has returned, so it never points past data that isn't on disk, and shutdown waits for a sync in progress before saving the final cursor.
+**Fix:** the main loop only hands the buffered events to the operating system, which is quick, and a single background thread runs the `fsync` and then saves the cursor. Events keep being read and written while it runs. The cursor still only moves once the `fsync` has returned, so it never points past data that isn't on disk, and shutdown waits for a sync in progress before saving the final cursor.
 
-**Measured from now on:** each status line reports the longest sync and the longest main-loop pause of the last minute, and a sync over 1 second or a pause of 2 seconds or more is logged as a warning. That turns the explanation into something the log can confirm or rule out.
+**Measured continuously:** each status line reports the longest sync and the longest main-loop pause of the last minute, and a sync over 1 second or a pause of 2 seconds or more is logged as a warning. That turns the explanation into something the log can confirm or rule out.
 
 **Test:** a sync slowed to 0.3 seconds still lets events be written meanwhile, with the main loop never pausing more than 0.2 seconds. With the sync moved back onto the main loop, the same test fails.
 
@@ -285,7 +287,7 @@ Three changes to the event store's columns, measured from Iceberg's own per-colu
 
 **Decision:** the hourly run only appends: new versions of records to `records`, and a marker per delete to `record_deletes`. Which version is current is decided by a view ([D-031](#d-031-the-highest-rev-wins-and-deletes-leave-a-marker)). Nothing already written is read, so the hourly cost doesn't grow with the tables.
 
-**Cost of it:** queries do the work of picking the latest version and skipping deleted records, and deleted rows stay in the files until something rewrites them. That's a daily compaction in Athena, which runs inside AWS and so reads for free apart from Athena's per-byte price. It's the next step, and it also sets how long a deleted record can physically remain.
+**Cost of it:** queries do the work of picking the latest version and skipping deleted records, and deleted rows stay in the files until something rewrites them. That's a nightly compaction in Athena, which runs inside AWS and so reads for free apart from Athena's per-byte price. Compaction also sets how long a deleted record can physically remain ([D-033](#d-033-compaction-is-tiered-by-record-type-and-age-to-fit-the-budget)).
 
 **Alternatives:** Iceberg equality deletes, which remove rows by key without reading them first, are exactly this idea built into the format, but DuckDB only writes positional deletes. Running the hourly fold in Athena would avoid the transfer cost but not the growing scan.
 
@@ -307,7 +309,7 @@ Three changes to the event store's columns, measured from Iceberg's own per-colu
 
 ## D-032: Accounts are a view over the event store
 
-An account's current handle and status come from identity and account events, about 0.1% of the store. A view takes the latest of each by sequence number straight from the store, so there's no table to keep in sync. If it gets slow as the store grows, it becomes a projection like the others. Account history (SCD type 2) will come from the same events in the marts.
+An account's current handle and status come from identity and account events, about 0.1% of the store. A view takes the latest of each by sequence number straight from the store, so there's no table to keep in sync. If it gets slow as the store grows, it becomes a projection like the others. Account history (SCD type 2) is built from the same events in the marts ([D-039](#d-039-handles-are-looked-up-not-read-from-the-feed)).
 
 ## D-033: Compaction is tiered by record type and age, to fit the budget
 
@@ -331,9 +333,9 @@ An account's current handle and status come from identity and account events, ab
 
 **Making it cheap:** redaction is sourced from `records` before the deleted rows are removed, because those rows hold each version's exact event time. That tells Athena which hour partitions of the store to read and rewrite, instead of scanning the whole store.
 
-**Rejected:** leaving the store as it was, as interaction metadata rather than content. It holds no text, but "if someone deletes something, I delete it too" has no exception for metadata.
+**Rejected:** leaving the store as it was, as interaction metadata rather than content. It holds no text, but the project's commitment to honor deletes has no exception for metadata.
 
-**Knock-on:** redaction and file rewrites are commits to the store that add files without adding events. The projections job now reads the store's Iceberg metadata through Glue and folds only files from append commits ([D-030](#d-030-new-store-commits-are-found-by-their-iceberg-sequence-number)).
+**Knock-on:** redaction and file rewrites are commits to the store that add files without adding events. The projections job reads the store's Iceberg metadata through Glue and folds only files from append commits ([D-030](#d-030-new-store-commits-are-found-by-their-iceberg-sequence-number)).
 
 ## D-035: One writer at a time
 
@@ -371,11 +373,11 @@ The marts key accounts by a SHA-256 hash of their DID, so raw account IDs don't 
 
 ## D-039: Handles are looked up, not read from the feed
 
-**Found:** the first build of `dim_account` had handles for 3 of 1.8 million accounts. Jetstream's identity events had the handle in 28 of 74,610 cases. In the protocol the field is optional: an identity event says an account's identity changed, and anyone who needs the new handle is expected to resolve it. I'd built and tested the model against sample events that had handles, without checking what the real feed sends.
+**Found:** the first build of `dim_account` had handles for 3 of 1.8 million accounts. Jetstream's identity events had the handle in 28 of 74,610 cases. In the protocol the field is optional: an identity event says an account's identity changed, and anyone who needs the new handle is expected to resolve it. The model had been built and tested against sample events that carried handles, without checking what the real feed sends.
 
-**Decision:** a new hourly job, `resolve-handles`, reads the identity events in each new store commit and asks Bluesky's public API (`app.bsky.actor.getProfiles`) for those accounts' handles, 25 a call, at most two calls a second, backing off on 429s and server errors. Answers go into `account_handles`, and `dim_account` takes its handle history from there ([details](../architectures/handles.md)).
+**Decision:** an hourly job, `resolve-handles`, reads the identity events in each new store commit and asks Bluesky's public API (`app.bsky.actor.getProfiles`) for those accounts' handles, 25 a call, at most two calls a second, backing off on 429s and server errors. Answers go into `account_handles`, and `dim_account` takes its handle history from there ([details](../architectures/handles.md)).
 
-**Why the API rather than resolving DID documents:** the AppView returns the handle only after checking it both ways (the DID claims the handle and the handle points back at the DID), and returns `handle.invalid` otherwise. Doing that check ourselves would mean a DNS or HTTPS request per handle on top of fetching the DID document. One call covers 25 accounts.
+**Why the API rather than resolving DID documents:** the AppView returns the handle only after checking it both ways (the DID claims the handle and the handle points back at the DID), and returns `handle.invalid` otherwise. Doing that check in the pipeline would mean a DNS or HTTPS request per handle on top of fetching the DID document. One call covers 25 accounts.
 
 **What's not kept:** the API also returns display names and bios. They're profile content, and the project keeps no record content ([D-026](#d-026-a-leaner-event-store)), so they're dropped.
 
@@ -392,7 +394,6 @@ The marts key accounts by a SHA-256 hash of their DID, so raw account IDs don't 
 **Rejected:** an incremental `dim_post` that merges new posts in and replaces placeholders in place. On Athena every merge reads the whole target to find matching rows, the same problem the projections ran into ([D-029](#d-029-projections-are-appended-to-not-updated-in-place)), and deletes would need handling a second time.
 
 **Post age from the key:** how long after a post its likes arrive is computed from the post's TID key, so it works for posts made before collection began, without a lookup.
-
 
 ## D-041: Alerts come from outside the server
 
@@ -420,7 +421,7 @@ The marts key accounts by a SHA-256 hash of their DID, so raw account IDs don't 
 
 **Rejected:**
 
-- **A public S3 bucket the page fetches from**, my first plan. It works, but opens a bucket to the internet, needs CORS, and puts the AWS account ID in the page's source.
+- **A public S3 bucket the page fetches from**, the original plan. It works, but opens a bucket to the internet, needs CORS, and puts the AWS account ID in the page's source.
 - **Committing the JSON to the repository every night**: a commit a day of generated data, and a GitHub token on the server.
 - **Streamlit or Grafana:** a server that's always on, to show numbers that change once a day.
 - **The page querying Athena live:** a cost per visitor, and AWS reachable from the internet.

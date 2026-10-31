@@ -2,7 +2,7 @@
 
 ## Purpose
 
-An always-free Oracle Cloud server runs the collector, the uploader and the event store job, and AWS stores and queries the data. The AWS side is Terraform in `infra/aws/`, the server's services are unit files in `deploy/systemd/`. The reasons for the split are in [D-008](../decisions/engineering-decisions.md#d-008-collector-server-on-oracle-cloud-data-on-aws).
+An always-free Oracle Cloud server runs the collector and every scheduled job, AWS stores and queries the data, and GitHub hosts the public report. The AWS side is Terraform in `infra/aws/`, the server's services are unit files in `deploy/systemd/`. The reasons for the split are in [D-008](../decisions/engineering-decisions.md#d-008-collector-server-on-oracle-cloud-data-on-aws).
 
 ## Design
 

@@ -114,7 +114,7 @@ Compaction and the hourly job commit to the same tables. Two writers committing 
 
 - **Exact duplicate rows**, which only a crash between appending and logging a projection run can create, aren't removed. The views ignore them.
 - **If the projections job is down for the two hours between compaction and the vacuum**, the vacuum expires compaction's commits before the job has seen them, and the job can no longer tell they were rewrites. It would then fold the rewritten files again: duplicates the views ignore, but that compaction doesn't remove.
-- **The monthly run grows with the data.** At about $1 a month at six months, that's fine for now. Past a year, the full pass for likes could move to every second month.
+- **The monthly run grows with the data.** At about $1 a month at six months of data, that fits the budget. Past a year, the full pass for likes could move to every second month.
 
 ## Cost
 
@@ -127,4 +127,4 @@ Logged in `compaction_runs` for every run. The first ones:
 | First vacuum | all three tables | under a minute | 0 | under 1 cent |
 | Second nightly run, daily tier | records created since 25 October | 4.5 min | 22.1 GB | 11 cents |
 
-The daily runs cost as much as the full one, and more each night, because the project started collecting on 24 October: three days back was still nearly all of the data, and the data grows by about a day's worth each night. The tiers only start saving once there's history older than their reach, from about 3 November for the daily run. That's when the estimate of about $2 a month gets its first real check, and when it'll show whether Athena really skips the partitions outside a run's reach.
+The daily runs cost as much as the full one, and more each night, because the project started collecting on 24 October: three days back was still nearly all of the data, and the data grows by about a day's worth each night. The tiers only start saving once there's history older than their reach, from about 3 November for the daily run. That's when the estimate of about $2 a month gets its first real check, and when the run log shows whether Athena skips the partitions outside a run's reach.
