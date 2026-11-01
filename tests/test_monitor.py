@@ -125,16 +125,38 @@ def test_run_check_pings_success_or_failure(tmp_path, monkeypatch):
     assert body.startswith(b"The newest event is 20 min old")
 
 
-def scheduled_services() -> list[str]:
-    return sorted(p.stem for p in SYSTEMD.glob("*.timer"))
+def job_units() -> list[str]:
+    """Every unit that runs a job: everything but the collector, the health check and the alert."""
+    skip = {"bluesky-collect", "bluesky-check", "bluesky-alert@"}
+    return sorted(p.stem for p in SYSTEMD.glob("*.service") if p.stem not in skip)
 
 
-@pytest.mark.parametrize("name", scheduled_services())
-def test_every_scheduled_job_reports_to_healthchecks(name):
+@pytest.mark.parametrize("name", job_units())
+def test_every_job_reports_to_healthchecks(name):
     unit = (SYSTEMD / f"{name}.service").read_text()
     assert "EnvironmentFile=-/etc/bluesky/monitor.env" in unit
-    if name == "bluesky-check":
-        assert "check-health" in unit
-        return
     assert "OnFailure=bluesky-alert@%n.service" in unit
-    assert re.search(rf"^ExecStartPost=\S+/ping-check {name}$", unit, re.MULTILINE)
+    assert re.search(rf"^ExecStartPost=\S+/ping-check {name.removesuffix('@')}$", unit, re.MULTILINE)
+
+
+def test_the_health_check_runs_on_a_timer_and_reports():
+    unit = (SYSTEMD / "bluesky-check.service").read_text()
+    assert "EnvironmentFile=-/etc/bluesky/monitor.env" in unit and "check-health" in unit
+    assert (SYSTEMD / "bluesky-check.timer").exists()
+
+
+@pytest.mark.parametrize(
+    "unit, check",
+    [
+        ("bluesky-process.service", "bluesky-process"),
+        ("bluesky-project.service", "bluesky-process"),
+        ("bluesky-handles.service", "bluesky-process"),
+        ("bluesky-marts@2026-10-30.service", "bluesky-marts"),
+        ("bluesky-export.service", "bluesky-marts"),
+        ("bluesky-vacuum", "bluesky-vacuum"),
+        ("bluesky-check", "bluesky-check"),
+    ],
+)
+def test_each_unit_reports_to_its_jobs_check(unit, check):
+    assert monitor.slug_for(unit) == check
+    assert monitor.ping_url("k", unit, fail=True) == f"https://hc-ping.com/k/{check}/fail"

@@ -30,3 +30,18 @@ jobs:
         run: terraform init -backend=false
       - name: Validate
         run: terraform validate
+
+  orchestration:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: astral-sh/setup-uv@v10.3.2
+      - name: Install Airflow with its pinned constraints
+        run: |
+          uv venv --python 3.14 .airflow
+          uv pip install --python .airflow "apache-airflow==3.3.2" pytest --constraint https://raw.githubusercontent.com/apache/airflow/constraints-3.3.2/constraints-3.14.txt
+      - name: Test the DAGs and the operator
+        run: .airflow/bin/python -m pytest orchestration/tests
+        env:
+          AIRFLOW_HOME: ${{ runner.temp }}/airflow
+          AIRFLOW__CORE__LOAD_EXAMPLES: "False"

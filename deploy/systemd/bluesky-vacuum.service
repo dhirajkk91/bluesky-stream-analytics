@@ -1,5 +1,5 @@
 [Unit]
-Description=Expire old snapshots and delete unused files, so compacted-away data leaves S3
+Description=Expire old snapshots and delete unused files, so compacted-away data leaves S3 (started nightly by Airflow, once compaction's snapshots are past retention)
 After=network-online.target
 Wants=network-online.target
 OnFailure=bluesky-alert@%n.service

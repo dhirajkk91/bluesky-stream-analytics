@@ -114,7 +114,7 @@ That's what makes partitioning by creation day possible: even a delete of a like
 | What happens | Result |
 |---|---|
 | The job dies before logging a run | The next run folds that commit again. The duplicate rows don't change any view |
-| The event store load fails | `project` doesn't run that hour (it runs after `process` in the same service). The next run catches up on every commit since |
+| The event store load fails | `project` doesn't run that hour (it runs after `process` in the [hourly DAG](orchestration.md)). The next run catches up on every commit since |
 | Compaction redacts or rewrites store files | Those commits aren't appends, so the run skips them; the events in them were folded when they first arrived |
 | An equality delete file appears in the event store | The run stops with an error. Nothing writes them, and reading files directly can't follow them |
 | The tables are lost or need a fix | Drop them and run `project`: with no runs logged, it folds every commit from the first |

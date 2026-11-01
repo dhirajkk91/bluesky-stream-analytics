@@ -427,3 +427,27 @@ The marts key accounts by a SHA-256 hash of their DID, so raw account IDs don't 
 - **The page querying Athena live:** a cost per visitor, and AWS reachable from the internet.
 
 **Accepted:** the page is only as fresh as its last deploy. The workflow runs once a day after the marts, and the page says when it was updated.
+
+## D-043: Airflow starts the systemd units; it doesn't run the jobs
+
+**Context:** the hourly and nightly jobs ran on fixed systemd timers spaced far enough apart to usually finish in order: the marts at 04:30 assumed compaction from 03:45 had finished, and the vacuum at 05:45 assumed compaction's snapshots had expired. Nothing enforced it, and a missed nightly timer went unnoticed for two days ([monitoring](../architectures/monitoring.md#in-production)).
+
+**Decision:** Airflow 3.3 runs the jobs as DAGs, and each task starts the job's existing systemd unit and waits for it ([details](../architectures/orchestration.md)). The `airflow` user can start the project's job units through a single root-owned script, allowed by sudo, that refuses any other unit.
+
+**Why this split:**
+
+- **No secrets in Airflow.** The AWS keys stay in root-only files that systemd reads for each unit, as in [D-013](#d-013-the-uploaders-key-lives-in-a-root-only-file-read-by-systemd). Running the commands from Airflow directly would mean giving the `airflow` user the keys, or storing them as Airflow connections.
+- **Nothing about the jobs changes.** They keep their sandbox, the lake lock ([D-035](#d-035-one-writer-at-a-time)), their memory caps, and their healthchecks.io pings and failure emails ([D-041](#d-041-alerts-come-from-outside-the-server)). A job can still be run by hand with `systemctl start`, exactly as Airflow runs it.
+- **Airflow does what it's good at:** dependencies, retries, a record of every run, and backfills.
+
+**Why not Airflow for everything:** collection, upload and the health check keep their own systemd timers. They protect the data and the alerting, so they shouldn't stop when the orchestrator does.
+
+**Why Postgres and the LocalExecutor:** every task waits on a job on the same server, so a distributed executor would add nothing. Postgres is Airflow's supported production database; SQLite is for development only.
+
+**Rejected:**
+
+- **Keeping the timers with longer gaps:** still assumptions, only safer ones, and no record of runs or way to rebuild a past day.
+- **Dagster or Prefect:** both would work, and Dagster's asset model suits dbt well. Airflow is the most widely used orchestrator, and its DAG model fits jobs that are steps more than assets.
+- **Airflow's `BashOperator` with the keys in Airflow:** the textbook setup, but it moves secrets into another system and duplicates the units' sandboxing in Airflow.
+
+**Cost:** about 1.5 GB of the server's memory for Airflow and Postgres, one more set of services to keep running, and a sudo rule. The rule is limited to one script that checks its arguments, and is covered by tests.

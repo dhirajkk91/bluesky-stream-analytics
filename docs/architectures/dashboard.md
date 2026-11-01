@@ -23,7 +23,7 @@ Non-goals:
 
 ```mermaid
 flowchart LR
-    subgraph VM["Oracle Cloud server, 04:30 UTC"]
+    subgraph VM["Oracle Cloud server, nightly after compaction"]
         B["dbt build<br/>the marts"]
         X["export-dashboard"]
     end
@@ -48,7 +48,7 @@ flowchart LR
     V --> P
 ```
 
-1. **Export.** Right after the marts build, in the same service, `export-dashboard` runs five small Athena queries and writes one JSON file, a few tens of kilobytes, to `dashboard/dashboard.json` in the project's bucket. The bucket stays private.
+1. **Export.** Right after the marts build, as the next task of the [nightly DAG](orchestration.md), `export-dashboard` runs five small Athena queries and writes one JSON file, a few tens of kilobytes, to `dashboard/dashboard.json` in the project's bucket. The bucket stays private.
 2. **Publish.** Every morning at 06:17 UTC, and whenever `site/` changes, a GitHub Actions workflow copies that file into `site/data/` and deploys `site/` to GitHub Pages.
 3. **Read.** The page is plain HTML, CSS and one script. It loads `data/dashboard.json` from its own site and draws the charts with [Observable Plot](https://observablehq.com/plot/).
 
@@ -81,7 +81,7 @@ The first day of collection began partway through, so it's left out of the chart
 
 | What happens | Result |
 |---|---|
-| The export fails | The marts service fails, and monitoring emails within a minute. The page keeps yesterday's numbers |
+| The export fails | The `bluesky-export` unit emails within a minute, and Airflow retries it twice. The page keeps yesterday's numbers |
 | The workflow fails | GitHub emails the repository owner. The page keeps yesterday's numbers |
 | The export ran late | The page shows the date it's "updated" and the last whole day, so stale numbers are visible as stale |
 | The JSON can't be loaded | The page says so, instead of drawing empty charts |

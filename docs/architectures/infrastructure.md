@@ -17,8 +17,9 @@ flowchart LR
         subgraph VM["VM.Standard.A1.Flex, Ubuntu 24.04"]
             C["bluesky-collect.service"]
             U["bluesky-upload.timer<br/>→ bluesky-upload.service"]
-            P["bluesky-process.timer<br/>→ bluesky-process.service"]
-            K["bluesky-compact.timer, bluesky-vacuum.timer<br/>→ compact"]
+            AF["Airflow<br/>hourly and nightly DAGs"]
+            P["bluesky-process, -project, -handles<br/>hourly job units"]
+            K["bluesky-compact, -marts@, -export, -vacuum<br/>nightly job units"]
             D["/var/lib/bluesky"]
             E["/etc/bluesky/*.env<br/>root only"]
             CH["bluesky-check.timer<br/>and every job's pings"]
@@ -36,6 +37,8 @@ flowchart LR
     end
 
     J["Jetstream"] --> C
+    AF -->|"sudo bluesky-unit start"| P
+    AF -->|"sudo bluesky-unit start"| K
     C --> D
     U --> D
     E -.->|"keys, via systemd"| U
@@ -65,7 +68,7 @@ flowchart LR
 | Shape | `VM.Standard.A1.Flex` (ARM), 2 OCPU, 12 GB memory, 100 GB boot volume |
 | OS | Ubuntu 24.04 (aarch64), with `build-essential`: one of dbt's dependencies (`mmh3` 4.1) has no prebuilt package for Python 3.14 on ARM and is compiled when installed |
 | Account | Pay As You Go, so the server isn't reclaimed as idle. Free within the Always Free limits |
-| Network | VCN `bluesky-vcn` (`10.0.0.0/16`) with an internet gateway, a default route `0.0.0.0/0` to it, and a public subnet `10.0.0.0/24`. Only SSH (22) open inbound, key login only. The programs only connect outbound: to Jetstream, to AWS, and to Bluesky's public API for handle lookups |
+| Network | VCN `bluesky-vcn` (`10.0.0.0/16`) with an internet gateway, a default route `0.0.0.0/0` to it, and a public subnet `10.0.0.0/24`. Only SSH (22) open inbound, key login only; Airflow's UI listens on localhost and is reached through an SSH tunnel. The programs only connect outbound: to Jetstream, to AWS, and to Bluesky's public API for handle lookups |
 
 | Path | What |
 |---|---|
@@ -74,26 +77,36 @@ flowchart LR
 | `/etc/bluesky/upload.env` | Bucket name and the uploader's AWS key, `root:root`, mode `600` |
 | `/etc/bluesky/process.env` | Bucket name and the processor's AWS key, `root:root`, mode `600` |
 | `/etc/bluesky/monitor.env` | The healthchecks.io ping key, `root:root`, mode `600` |
-| `/etc/systemd/system/bluesky-*` | Copies of `deploy/systemd/` |
+| `/etc/bluesky/airflow-secrets.env` | The keys Airflow's components sign their requests to each other with, `root:root`, mode `600` |
+| `/etc/systemd/system/bluesky-*`, `airflow-*` | Copies of `deploy/systemd/` and of the units in `deploy/airflow/` |
+| `/opt/airflow/venv` | Airflow 3.3.2, in its own virtual environment |
+| `/var/lib/airflow` | Airflow's home: logs, and the generated UI password |
+| `/usr/local/sbin/bluesky-unit` | The script Airflow starts job units through, `root:root`, mode `755` |
+| `/etc/sudoers.d/bluesky-airflow` | Lets the `airflow` user run `bluesky-unit` as root, and nothing else |
 
 | Unit | What it does |
 |---|---|
 | `bluesky-collect.service` | Runs `collect`. Starts on boot, restarts 5 seconds after a crash, stopped with `SIGTERM` so the current file is finished |
 | `bluesky-upload.timer` | Starts `bluesky-upload.service` at :00, :10, :20 … every hour |
 | `bluesky-upload.service` | Runs `upload` once. systemd reads the key file as root and passes the values in as environment variables |
-| `bluesky-process.timer` | Starts `bluesky-process.service` at 20 past every hour |
-| `bluesky-compact.timer` | Starts `bluesky-compact.service` at 03:45 UTC every night |
-| `bluesky-compact.service` | Runs `compact`, which sends the night's compaction to Athena and waits for it |
-| `bluesky-vacuum.timer` | Starts `bluesky-vacuum.service` at 05:45 UTC every night |
-| `bluesky-vacuum.service` | Runs `compact --vacuum`, which expires old snapshots and deletes unused files |
-| `bluesky-marts.timer` | Starts `bluesky-marts.service` at 04:30 UTC every night |
-| `bluesky-marts.service` | Runs `dbt build`, which builds and tests the marts in Athena, then `export-dashboard`, which writes the dashboard's numbers to S3 |
 | `bluesky-check.timer` | Starts `bluesky-check.service` at :05, :15, :25 … every hour |
 | `bluesky-check.service` | Runs `check-health`, which checks the newest event, the file backlogs and the disk, and pings healthchecks.io ([monitoring](monitoring.md)) |
-| `bluesky-alert@.service` | Started by systemd when a scheduled job fails; sends the end of its log to healthchecks.io |
-| `bluesky-process.service` | Runs the event store job once, then the projections job, then the handle lookups. DuckDB is held to 2 threads and 3 GB, the service runs at a lower CPU priority than the collector, and systemd caps it at 4 GB of memory |
+| `bluesky-process.service` | Runs `process`, which loads the uploaded files into the event store. DuckDB is held to 2 threads and 3 GB, the service runs at a lower CPU priority than the collector, and systemd caps it at 4 GB of memory, as for the next two |
+| `bluesky-project.service` | Runs `project`, which folds new store commits into the projections |
+| `bluesky-handles.service` | Runs `resolve-handles`, which looks up the handles of accounts whose identity changed |
+| `bluesky-compact.service` | Runs `compact`, which sends the night's compaction to Athena and waits for it |
+| `bluesky-marts@.service` | Runs `dbt build` for the two days before the date in its name, building and testing the marts in Athena |
+| `bluesky-export.service` | Runs `export-dashboard`, which writes the report's numbers to S3 |
+| `bluesky-vacuum.service` | Runs `compact --vacuum`, which expires old snapshots and deletes unused files |
+| `bluesky-alert@.service` | Started by systemd when a job fails; sends the end of its log to healthchecks.io |
+| `airflow-api-server.service` | Airflow's API and web UI, on `127.0.0.1:8080` only, reached through an SSH tunnel |
+| `airflow-scheduler.service` | Runs the DAGs, and their tasks with the LocalExecutor |
+| `airflow-dag-processor.service` | Reads the DAG files from the checkout |
+| `postgresql.service` | Airflow's database, reached over the local socket with no password |
 
-All of them run as an unprivileged `bluesky` user, and the jobs that write to the lake tables take the same lock first (`flock /var/lib/bluesky/lake.lock`), so only one commits at a time ([D-035](../decisions/engineering-decisions.md#d-035-one-writer-at-a-time)). systemd keeps the rest of the filesystem read-only to them, so the only place they can write is `/var/lib/bluesky`. Logs go to the systemd journal.
+The job units have no timers: the [Airflow DAGs](orchestration.md) start them, each after the one it depends on. The collector, the uploader and the health check keep their own systemd timers, so that collecting data and alerting don't depend on Airflow.
+
+The `bluesky-*` units run as an unprivileged `bluesky` user, and the jobs that write to the lake tables take the same lock first (`flock /var/lib/bluesky/lake.lock`), so only one commits at a time ([D-035](../decisions/engineering-decisions.md#d-035-one-writer-at-a-time)). systemd keeps the rest of the filesystem read-only to them, so the only place they can write is `/var/lib/bluesky`. Logs go to the systemd journal.
 
 A1 capacity is only needed to start an instance, so the server is rebooted, never stopped. A stopped instance can only start again if the region has free capacity.
 

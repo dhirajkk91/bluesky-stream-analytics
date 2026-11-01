@@ -1,5 +1,5 @@
 [Unit]
-Description=Compact the projections and redact deleted records in the event store, in Athena
+Description=Compact the projections and redact deleted records in the event store, in Athena (started nightly by Airflow)
 After=network-online.target
 Wants=network-online.target
 OnFailure=bluesky-alert@%n.service

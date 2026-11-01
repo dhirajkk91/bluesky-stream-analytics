@@ -4,7 +4,7 @@ How each part of the pipeline was verified: the automated test suite, deliberate
 
 ## Automated tests
 
-`uv run pytest` runs everything below. None of it needs a network connection or an AWS account.
+`uv run pytest` runs everything below except the orchestration tests, which need Airflow and run in their own CI job. None of it needs a network connection or an AWS account.
 
 | Area | What's checked |
 |---|---|
@@ -24,6 +24,8 @@ How each part of the pipeline was verified: the automated test suite, deliberate
 | Compaction | Run as SQL against local tables: removes rows with a newer delete or version within reach, and nothing current; redacts the store events of deleted records only, keeping every event; leaves records out of the tier's reach alone until a wider tier; running again changes nothing; the handles of deleted accounts are forgotten. Which tier runs on which date and how far each reaches. A failed step stops the run and is logged, and every step is logged in one statement |
 | Monitoring | The ping URL for each check, a missing key skips pinging, a failure ping carries the end of the log, and a ping that can't get through is retried and never raises. The health check passes a healthy server and catches a stalled collector, a missing or broken cursor, files waiting too long to upload or be processed, and a full disk. Every scheduled job's unit pings its check and alerts on failure |
 | Dashboard export | Run on the sample marts: the first, partial day is marked, and the post age curve and languages cover the whole days. Signup days under 100 accounts are left out, and languages under 100 posts a day fold into "other". How long deletes stayed visible, and Athena's results read back with their types across pages |
+| Orchestration | In its own CI job, with Airflow installed: the three DAGs load with no import errors, their tasks depend on each other as designed, the marts are built up to the run's day (including a manual run with no logical date), the vacuum waits until 70 minutes after compaction, and a range of past days becomes one marts unit per day. The operator starts its unit through the sudo script, copies the unit's log, fails the task when the unit fails, and stops the unit when killed |
+| Job unit permissions | The script Airflow starts units through refuses the collector, the uploader, the health check, other units, other actions, wrong argument counts, and names that smuggle in a second unit with a space or a newline; it lets every job unit through. Every job unit reports to healthchecks.io, and each maps to its job's check |
 | Backfill download | Only finished files under the requested day or hour, across pages of results, and nothing already waiting locally is downloaded again |
 
 ## Kill test

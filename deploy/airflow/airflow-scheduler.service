@@ -1,0 +1,22 @@
+[Unit]
+Description=Airflow scheduler, which also runs the tasks (LocalExecutor)
+After=network-online.target postgresql.service
+Wants=network-online.target postgresql.service
+
+[Service]
+Type=simple
+User=airflow
+Group=airflow
+EnvironmentFile=/opt/bluesky-stream-analytics/deploy/airflow/airflow.env
+EnvironmentFile=/etc/bluesky/airflow-secrets.env
+# No NoNewPrivileges here: tasks start the job units through sudo.
+ExecStart=/opt/airflow/venv/bin/airflow scheduler
+Restart=on-failure
+RestartSec=10
+TimeoutStopSec=120
+MemoryMax=1500M
+StateDirectory=airflow
+Environment=PYTHONUNBUFFERED=1
+
+[Install]
+WantedBy=multi-user.target

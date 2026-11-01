@@ -1,0 +1,3 @@
+# Lets Airflow start and stop the project's job units, through a script that
+# checks which unit it's given, and nothing else.
+airflow ALL=(root) NOPASSWD: /usr/local/sbin/bluesky-unit
