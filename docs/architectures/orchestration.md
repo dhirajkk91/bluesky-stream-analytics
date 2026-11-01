@@ -94,7 +94,7 @@ The healthchecks.io checks are unchanged in number. Each job unit still pings it
 
 ## Setup on the server
 
-Airflow runs in its own virtual environment, installed with Airflow's pinned constraints so its dependencies never conflict with the project's. Its database is a local Postgres reached over the Unix socket, so it needs no password. The UI is reached with `ssh -L 8080:127.0.0.1:8080` and the generated admin password in `/var/lib/airflow`.
+Airflow runs in its own virtual environment, installed with Airflow's pinned constraints so its dependencies never conflict with the project's. The environment and the Python 3.14 it runs on both live under `/opt/airflow`, outside any user's home, so the `airflow` user can run them. Its database is a local Postgres reached over the Unix socket, so it needs no password. The UI is reached with `ssh -L 8080:127.0.0.1:8080` and the generated admin password in `/var/lib/airflow`.
 
 | File in the repo | Installed as |
 |---|---|
@@ -121,11 +121,22 @@ af() { sudo systemd-run --quiet --wait --pipe --uid=airflow --gid=airflow -p Env
 | Open the UI | `ssh -L 8080:127.0.0.1:8080 ubuntu@<server>` from the laptop, then `http://localhost:8080`. The admin password is in `/var/lib/airflow/simple_auth_manager_passwords.json.generated` |
 | Run a job by hand, outside Airflow | `sudo systemctl start bluesky-compact.service`, exactly as Airflow starts it |
 
+`af dags list` reads the DAGs from Airflow's database, which the DAG processor fills after its first pass over the DAG files. For a few seconds after the services start it shows nothing; `af dags list-import-errors` showing nothing means every DAG loaded.
+
 ## Testing
 
 - **In CI**, a separate job installs Airflow 3.3.2 with its constraints and checks that the DAGs load without errors, that their tasks depend on each other as described here, and that the operator starts the right unit, copies its log, fails when the unit fails, and stops the unit when killed.
 - **In the main suite**, the `bluesky-unit` script is tested against units it must refuse, including names that try to smuggle in a second unit with a space or a newline, and against every unit it must allow.
+- **Without a database.** The tests take the DAGs as parsed from `DagBag.dags`, not through `DagBag.get_dag()`, which in Airflow 3 also queries the metadata database. CI starts from an empty Airflow home, so the tests need no database and pass the same on a fresh machine as on one that has run Airflow before.
 - **End to end**, the DAGs were run with `airflow dags test` against stand-in `sudo`, `systemctl` and `journalctl` commands, which checked the unit names each task starts, including the dated marts units.
+
+## In production
+
+The switch was made in one step: the timers of the hourly and nightly jobs were disabled and removed, the new units installed, and the three Airflow services started, so no job could run from both a timer and a DAG. Afterwards:
+
+- the three DAGs loaded with no import errors, and `hourly`, `nightly` and `rebuild_marts` were unpaused;
+- the only timers left were `bluesky-upload` and `bluesky-check`;
+- `airflow-api-server`, `airflow-scheduler` and `airflow-dag-processor` were active.
 
 ## Cost
 
