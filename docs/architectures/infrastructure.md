@@ -80,6 +80,7 @@ flowchart LR
 | `/etc/bluesky/airflow-secrets.env` | The keys Airflow's components sign their requests to each other with, `root:root`, mode `600` |
 | `/etc/systemd/system/bluesky-*`, `airflow-*` | Copies of `deploy/systemd/` and of the units in `deploy/airflow/` |
 | `/opt/airflow/venv` | Airflow 3.3.2, in its own virtual environment |
+| `/opt/airflow/python` | The Python 3.14 Airflow's environment runs on, outside any user's home so the `airflow` user can read it |
 | `/var/lib/airflow` | Airflow's home: logs, and the generated UI password |
 | `/usr/local/sbin/bluesky-unit` | The script Airflow starts job units through, `root:root`, mode `755` |
 | `/etc/sudoers.d/bluesky-airflow` | Lets the `airflow` user run `bluesky-unit` as root, and nothing else |
