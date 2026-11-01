@@ -52,8 +52,8 @@ The daily run catches over a third of all deletes, the quick unlikes and unfollo
 ```mermaid
 flowchart LR
     subgraph VM["Oracle Cloud server"]
-        T1["bluesky-compact.timer<br/>03:45 UTC"]
-        T2["bluesky-vacuum.timer<br/>05:45 UTC"]
+        T1["Airflow nightly DAG<br/>03:45 UTC"]
+        T2["the same DAG,<br/>70 min after compaction"]
         C["compact<br/>sends SQL to Athena,<br/>waits, logs each step"]
         L["lake.lock<br/>one writer at a time"]
     end
@@ -88,7 +88,7 @@ One row per step goes into `compaction_runs`: when, the tier, the step and its r
 
 Compaction also removes the looked-up handles of accounts deleted within the tier's reach ([handle lookups](handles.md#deletes)), and optimizes `account_handles`.
 
-Two hours later, `compact --vacuum` runs `VACUUM` on `records`, `record_deletes`, `events` and `account_handles`. Every table keeps an hour of snapshots, so by then the snapshots from before compaction have expired, and the files only they referred to are deleted. That's the moment a deleted record's data is gone from S3.
+Once compaction has finished, the [nightly DAG](orchestration.md) waits 70 minutes, then `compact --vacuum` runs `VACUUM` on `records`, `record_deletes`, `events` and `account_handles`. Every table keeps an hour of snapshots, so by then the snapshots from before compaction have expired, and the files only they referred to are deleted. That's the moment a deleted record's data is gone from S3.
 
 **Delete markers stay.** They're what stops a create replayed from a backfill from bringing a deleted record back ([D-031](../decisions/engineering-decisions.md#d-031-the-highest-rev-wins-and-deletes-leave-a-marker)). They hold only the key, `rev` and time.
 
@@ -106,14 +106,14 @@ Compaction and the hourly job commit to the same tables. Two writers committing 
 | What happens | Result |
 |---|---|
 | A step fails | The run stops there and logs the failed step. Every step is safe to run again, so the next night's run picks up the rest |
-| The run is skipped (server down) | The timer runs it when the server is back. A missed daily run is covered by the next one, which reaches 3 days back |
+| The run is skipped (server or Airflow down) | A missed daily run is covered by the next one, which reaches 3 days back |
 | The hourly job is running | Compaction waits for the lock, and the other way round |
 | Redaction rewrites store files | The projections skip those commits. If one were folded anyway, its rows would only duplicate ones already there, which the views ignore |
 
 ## Limits
 
 - **Exact duplicate rows**, which only a crash between appending and logging a projection run can create, aren't removed. The views ignore them.
-- **If the projections job is down for the two hours between compaction and the vacuum**, the vacuum expires compaction's commits before the job has seen them, and the job can no longer tell they were rewrites. It would then fold the rewritten files again: duplicates the views ignore, but that compaction doesn't remove.
+- **If the projections job is down for the 70 minutes between compaction and the vacuum**, the vacuum expires compaction's commits before the job has seen them, and the job can no longer tell they were rewrites. It would then fold the rewritten files again: duplicates the views ignore, but that compaction doesn't remove.
 - **The monthly run grows with the data.** At about $1 a month at six months of data, that fits the budget. Past a year, the full pass for likes could move to every second month.
 
 ## Cost

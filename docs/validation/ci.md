@@ -6,6 +6,7 @@ Every pull request and every push to `main` runs [`.github/workflows/ci.yml`](..
 |---|---|
 | tests | Installs the locked dependencies with `uv sync --locked` and runs the full test suite |
 | terraform | `terraform fmt -check`, then `terraform init -backend=false` and `terraform validate` on `infra/aws/` |
+| orchestration | Installs Airflow 3.3.2 with its pinned constraints in its own environment, then tests that the DAGs load and are wired as designed, and tests the operator that starts the job units |
 
 `uv sync --locked` fails if `uv.lock` doesn't match `pyproject.toml`, so a dependency change can't be merged without its lock file.
 

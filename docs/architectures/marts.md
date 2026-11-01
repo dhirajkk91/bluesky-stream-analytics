@@ -15,7 +15,7 @@ flowchart LR
     EV[("bluesky_store.events")]
     AH[("bluesky_store.account_handles")]
     CR[("bluesky_store.current_records<br/>projections")]
-    subgraph dbt["dbt, run in Athena at 04:30 UTC"]
+    subgraph dbt["dbt, run in Athena nightly, after compaction"]
         SC["stg_commits<br/>writes, classified"]
         SA["stg_account_changes<br/>status events and<br/>handle lookups"]
         FA["fct_account_activity_daily<br/>account × day"]
@@ -116,7 +116,9 @@ A deleted parent gets a placeholder too, since it's no longer in `current_record
 
 ## Running it
 
-`bluesky-marts.timer` starts `dbt build` at 04:30 UTC, after compaction and before the vacuum. It builds every model and runs every test; a failing test fails the run. Then `export-dashboard` writes the totals the [dashboard](dashboard.md) shows. The first run finds no tables and builds everything from 24 October.
+The [nightly DAG](orchestration.md) runs `dbt build` as soon as compaction has finished, through the `bluesky-marts@<date>` unit, where the date is the day the build runs up to. It builds every model and runs every test; a failing test fails the run, and the export doesn't run. Then `export-dashboard` writes the totals the [dashboard](dashboard.md) shows. A first run finds no tables and builds everything from 24 October.
+
+To rebuild past days, after a fix to a model or a late load, trigger the `rebuild_marts` DAG with the first and last day ([rebuilding past days](orchestration.md#rebuilding-past-days)).
 
 The SQL runs in Athena through the `dbt-athena` adapter, in the `bluesky_marts` Glue database, as Iceberg tables. dbt v2 doesn't support Athena, so this is dbt Core 1.12 ([D-036](../decisions/engineering-decisions.md#d-036-dbt-core-on-athena-for-the-marts)).
 

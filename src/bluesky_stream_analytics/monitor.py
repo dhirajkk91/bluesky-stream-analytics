@@ -52,9 +52,23 @@ def post_body(url: str, body: bytes, timeout: float = 10) -> None:
         pass
 
 
+# Units that report to another unit's check: the hourly and nightly jobs each have
+# one check on healthchecks.io, whichever of their steps is reporting.
+SHARED_CHECKS = {
+    "bluesky-project": "bluesky-process",
+    "bluesky-handles": "bluesky-process",
+    "bluesky-export": "bluesky-marts",
+}
+
+
 def slug_for(name: str) -> str:
-    """The check's slug for a check or unit name: bluesky-process.service is bluesky-process."""
-    return name.removesuffix(".service")
+    """
+    The check's slug for a check or unit name: bluesky-process.service is
+    bluesky-process, bluesky-marts@2026-10-30.service is bluesky-marts, and the
+    steps in SHARED_CHECKS report to their job's check.
+    """
+    unit = name.removesuffix(".service").split("@", 1)[0]
+    return SHARED_CHECKS.get(unit, unit)
 
 
 def ping_url(key: str, slug: str, fail: bool = False, base_url: str = PING_BASE_URL) -> str:

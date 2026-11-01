@@ -42,7 +42,7 @@ flowchart LR
 
 There are two halves:
 
-- **[healthchecks.io](https://healthchecks.io) is a dead man's switch.** It knows when each job should ping. It emails when a ping says the job failed, or when no ping arrives on time. Missing pings are what catch the cases where nothing runs at all: a timer that stopped, or a server that's down, which can't report on itself ([D-041](../decisions/engineering-decisions.md#d-041-alerts-come-from-outside-the-server)).
+- **[healthchecks.io](https://healthchecks.io) is a dead man's switch.** It knows when each job should ping. It emails when a ping says the job failed, or when no ping arrives on time. Missing pings are what catch the cases where nothing runs at all: a timer or [Airflow](orchestration.md) that stopped, or a server that's down, which can't report on itself ([D-041](../decisions/engineering-decisions.md#d-041-alerts-come-from-outside-the-server)).
 - **`check-health` reports what only the server can see**, every 10 minutes:
 
 | Check | Fails when | Because |
@@ -54,10 +54,12 @@ There are two halves:
 
 Its ping always carries a one-line summary ("newest event 2s old, 0 files to upload, 1 files to process, disk 14% used"). When something's wrong, the ping goes to `/fail` with what's wrong first. healthchecks.io puts the last ping's message in the email, so the alert says what broke.
 
-**How a job reports.** Every scheduled service has two extra lines:
+**How a job reports.** Every job unit has two extra lines:
 
 - `ExecStartPost=… ping-check bluesky-process`: runs only after the job succeeded, and pings its check.
 - `OnFailure=bluesky-alert@%n.service`: when the job fails, systemd starts `bluesky-alert@bluesky-process.service`. That sends the last 40 lines of the job's log to the check's `/fail` URL.
+
+Steps of the same job share a check: `bluesky-project` and `bluesky-handles` report to `bluesky-process`, and `bluesky-export` and the dated `bluesky-marts@…` units report to `bluesky-marts`. `ping-check` maps each unit to its check.
 
 A ping never fails a job. If healthchecks.io can't be reached, `ping-check` tries three times, logs a warning and exits 0.
 
@@ -73,14 +75,14 @@ All times UTC. The grace period is how late a ping can be before it counts as mi
 |---|---|---|---|
 | `bluesky-check` | `5-55/10 * * * *` | 15 min | `bluesky-check.timer` |
 | `bluesky-upload` | `*/10 * * * *` | 20 min | `bluesky-upload.service` |
-| `bluesky-process` | `20 * * * *` | 45 min | `bluesky-process.service` |
-| `bluesky-compact` | `45 3 * * *` | 2 h | `bluesky-compact.service` |
-| `bluesky-marts` | `30 4 * * *` | 1 h | `bluesky-marts.service` |
-| `bluesky-vacuum` | `45 5 * * *` | 1 h | `bluesky-vacuum.service` |
+| `bluesky-process` | `20 * * * *` | 45 min | the hourly DAG: `bluesky-process`, `-project` and `-handles` |
+| `bluesky-compact` | `45 3 * * *` | 2 h | the nightly DAG: `bluesky-compact.service` |
+| `bluesky-marts` | `45 3 * * *` | 2 h | the nightly DAG: `bluesky-marts@<date>` and `bluesky-export` |
+| `bluesky-vacuum` | `45 3 * * *` | 3 h | the nightly DAG: `bluesky-vacuum.service` |
 
-`bluesky-marts` also covers the dashboard export, which runs in the same service after the build. The workflow that publishes the page runs on GitHub, which emails when it fails.
+The nightly jobs all follow compaction, so their checks share its schedule, with grace for compaction plus the job itself: the marts and export take a few minutes, and the vacuum waits 70 minutes after compaction before it starts. The workflow that publishes the page runs on GitHub, which emails when it fails.
 
-Compaction gets the longest grace, because the monthly run reaches everything and it can wait for the hourly job's lock. The collector has no check of its own: it runs all the time instead of on a schedule, and `bluesky-check` covers it through the newest event.
+Compaction gets a long grace, because the monthly run reaches everything and it can wait for the hourly job's lock. The collector has no check of its own: it runs all the time instead of on a schedule, and `bluesky-check` covers it through the newest event.
 
 ## How soon an alert comes
 
@@ -88,7 +90,7 @@ Compaction gets the longest grace, because the monthly run reaches everything an
 |---|---|
 | A scheduled job fails | under a minute |
 | The collector stops, or Jetstream goes quiet | 5 to 15 minutes |
-| A timer stops starting its job | the job's grace period after its next run was due |
+| A timer or Airflow stops starting a job | the job's grace period after its next run was due |
 | The server goes down | 15 to 25 minutes, from `bluesky-check` |
 | Monthly spend reaches $8 | when AWS next updates the budget, a few times a day |
 
@@ -98,7 +100,8 @@ With this in place, the 27 October stall would have sent an email between 08:05 
 
 | Alert | First look |
 |---|---|
-| A job failed | The log lines in the email. Then `sudo journalctl -u <job> --no-pager \| tail -50` |
+| A job failed | The log lines in the email, or the task's log in the Airflow UI. Then `sudo journalctl -u <job> --no-pager \| tail -50`. Once fixed, clear the failed task in Airflow to run it and everything after it |
+| An hourly or nightly check is late, with no failure | Airflow isn't scheduling: `sudo systemctl status airflow-scheduler` |
 | Newest event too old | `sudo journalctl -u bluesky-collect --no-pager \| tail -20`. If it's connected with 0 events a minute, it's Jetstream; it usually comes back by itself. If the collector isn't running, `sudo systemctl status bluesky-collect` |
 | Files waiting to upload or process | The upload or process job's log; usually credentials or AWS |
 | Disk | `sudo du -sh /var/lib/bluesky/*` |

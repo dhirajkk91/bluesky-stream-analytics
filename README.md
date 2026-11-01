@@ -31,7 +31,7 @@ flowchart LR
     M --> D["Public report<br/>GitHub Pages"]
 ```
 
-The source is a stream of changes, so the pipeline is event-sourced rather than organized as bronze, silver and gold layers. The event log is the source of truth, and every other table is derived from it and can be rebuilt by replaying it ([why](docs/decisions/engineering-decisions.md#d-018-event-sourced-not-medallion)).
+The source is a stream of changes, so the pipeline is event-sourced rather than organized as bronze, silver and gold layers. The event log is the source of truth, and every other table is derived from it and can be rebuilt by replaying it ([why](docs/decisions/engineering-decisions.md#d-018-event-sourced-not-medallion)). Apache Airflow runs the hourly and nightly jobs as DAGs, each step starting only once the step it depends on has succeeded.
 
 | Layer | What it holds | How it changes | Built with |
 |---|---|---|---|
@@ -49,9 +49,10 @@ The source is a stream of changes, so the pipeline is event-sourced rather than 
 - **Order-independent current state.** Projections are folded incrementally from new Iceberg commits. The highest revision wins and deletes leave markers, so replayed and out-of-order events give the same answer. A full recount from the event store matched every record type exactly ([projections](docs/architectures/projections.md)).
 - **Deletes honored on a schedule, within budget.** A deleted record is hidden from every query in about 80 minutes and physically removed from S3 on tiered deadlines. The tiers come from measuring how old records are when they're deleted, which brings the projected compaction cost to about $2 a month at six months of data, against about $25 for a full nightly pass ([deletion policy](docs/architectures/compaction.md)).
 - **Kimball modeling with late and missing data.** An SCD type 2 account dimension, inferred-member placeholders for replies to posts that were never seen, and incremental facts that rebuild a two-day window for late events. 14 models and 32 data tests run on every build ([marts](docs/architectures/marts.md)).
+- **Orchestrated with Airflow, without handing it secrets.** The hourly and nightly jobs run as Airflow DAGs with dependencies, retries and on-demand rebuilds of past days. Each task starts the job's systemd unit through a root-owned script that sudo allows and that refuses any other unit, so the jobs keep their sandboxing and their AWS keys never reach Airflow ([orchestration](docs/architectures/orchestration.md)).
 - **No long-lived keys outside the server.** The publishing workflow reaches AWS through GitHub's OIDC provider, with a role that can read a single file, and nothing on AWS is public ([report](docs/architectures/dashboard.md)).
 - **Monitoring that has already paid off.** Every job reports to an external dead man's switch, failures email the end of their log, and a health check watches for a stalled stream, backlogs and disk space. On its first day it found a nightly job that had never been scheduled ([monitoring](docs/architectures/monitoring.md)).
-- **Tested at every layer.** 149 automated tests, including a fake Jetstream server, a fake S3, slow-disk simulations, and the dbt models built on DuckDB against hand-computed results. Every pull request also validates the Terraform ([testing](docs/validation/testing.md)).
+- **Tested at every layer.** 186 automated tests, including a fake Jetstream server, a fake S3, slow-disk simulations, and the dbt models built on DuckDB against hand-computed results. Every pull request also validates the Terraform and loads the Airflow DAGs ([testing](docs/validation/testing.md)).
 
 ## In numbers
 
@@ -62,7 +63,7 @@ The source is a stream of changes, so the pipeline is event-sourced rather than 
 | Time until a deleted record is hidden | about 80 minutes on average |
 | Event store size per event | 31 bytes |
 | Infrastructure | one Oracle Cloud Always Free server, and AWS within a $10 monthly budget |
-| Automated tests | 149 |
+| Automated tests | 186 |
 
 ## Tech stack
 
@@ -72,7 +73,8 @@ The source is a stream of changes, so the pipeline is event-sourced rather than 
 | Storage | Amazon S3, Apache Iceberg, AWS Glue Data Catalog |
 | Processing | DuckDB (hourly), Amazon Athena (nightly); Spark benchmarked |
 | Modeling | dbt Core with dbt-athena; dbt-duckdb in CI |
-| Infrastructure | Terraform, Oracle Cloud, systemd |
+| Orchestration | Apache Airflow 3.3 (LocalExecutor, Postgres), systemd |
+| Infrastructure | Terraform, Oracle Cloud |
 | Delivery and operations | GitHub Actions (CI, Pages, OIDC), healthchecks.io |
 | Report | HTML, CSS, Observable Plot |
 
@@ -90,11 +92,14 @@ The source is a stream of changes, so the pipeline is event-sourced rather than 
 | Continuously | `collect` | Reads Jetstream and writes hourly files |
 | Every 10 minutes | `upload` | Uploads finished hourly files to S3 |
 | Every 10 minutes | `check-health` | Checks the newest event, backlogs and disk space |
-| Hourly at :20 | `process`, `project`, `resolve-handles` | Loads the event store, folds the projections, looks up changed handles |
-| 03:45 | `compact` | Redacts deleted records and compacts the tables |
-| 04:30 | `dbt build`, `export-dashboard` | Builds and tests the marts, exports the report's numbers |
-| 05:45 | `compact --vacuum` | Removes the files compaction replaced |
+| Hourly at :20 | `hourly` DAG: `process`, then `project`, then `resolve-handles` | Loads the event store, folds the projections, looks up changed handles |
+| 03:45 | `nightly` DAG: `compact` | Redacts deleted records and compacts the tables |
+| after compaction | `nightly` DAG: `dbt build`, then `export-dashboard` | Builds and tests the marts, exports the report's numbers |
+| 70 minutes after compaction | `nightly` DAG: `compact --vacuum` | Removes the files compaction replaced, once their snapshots have expired |
 | 06:17 | Dashboard workflow | Publishes the report |
+| When triggered | `rebuild_marts` DAG | Rebuilds the marts for a range of past days |
+
+The collector, the upload and the health check run on their own systemd timers, so collecting data and alerting don't depend on Airflow.
 
 ## Repository layout
 
@@ -104,7 +109,8 @@ transform/                      dbt project: staging, intermediate and mart mode
 sql/                            Athena views and data checks
 site/                           the public report
 infra/aws/                      Terraform for S3, IAM, Glue, Athena, the budget and the OIDC role
-deploy/                         systemd units and environment file templates
+orchestration/dags/             Airflow DAGs, and the operator that starts the job units
+deploy/                         systemd units, Airflow's units and settings, environment file templates
 benchmarks/                     Spark against DuckDB
 tests/                          automated tests
 docs/                           architecture, decisions, validation
@@ -139,7 +145,6 @@ The AWS resources are defined in `infra/aws/`. Terraform also saves the SQL in `
 
 ## Roadmap
 
-- **Orchestration with Airflow.** Run the hourly and nightly jobs as DAGs, so each waits for the one before it instead of starting at a fixed time, with retries and backfills.
 - **A real-time path with Kafka.** Publish the stream to a topic, with a consumer counting trending hashtags and languages minute by minute alongside the nightly batch.
 - **Containers.** Package every job as a Docker image.
 - **The first month's analysis,** once day-30 retention is available.
@@ -156,6 +161,7 @@ The AWS resources are defined in `infra/aws/`. Terraform also saves the SQL in `
 - [Handle lookups](docs/architectures/handles.md): resolving handles through Bluesky's API, since the feed doesn't carry them
 - [Marts](docs/architectures/marts.md): the star schema, and how each metric is defined
 - [Dashboard](docs/architectures/dashboard.md): the public report
+- [Orchestration](docs/architectures/orchestration.md): the Airflow DAGs, and how they start the jobs
 - [Monitoring](docs/architectures/monitoring.md): alerts when something breaks
 - [Query layer](docs/architectures/query-layer.md): SQL with Athena
 - [Infrastructure](docs/architectures/infrastructure.md): the Oracle server and the AWS resources

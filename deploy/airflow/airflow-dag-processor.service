@@ -1,0 +1,21 @@
+[Unit]
+Description=Airflow DAG processor, which reads the DAG files
+After=network-online.target postgresql.service
+Wants=network-online.target postgresql.service
+
+[Service]
+Type=simple
+User=airflow
+Group=airflow
+EnvironmentFile=/opt/bluesky-stream-analytics/deploy/airflow/airflow.env
+EnvironmentFile=/etc/bluesky/airflow-secrets.env
+ExecStart=/opt/airflow/venv/bin/airflow dag-processor
+Restart=on-failure
+RestartSec=10
+TimeoutStopSec=120
+MemoryMax=768M
+StateDirectory=airflow
+Environment=PYTHONUNBUFFERED=1
+
+[Install]
+WantedBy=multi-user.target

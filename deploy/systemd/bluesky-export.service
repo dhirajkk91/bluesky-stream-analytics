@@ -1,0 +1,22 @@
+[Unit]
+Description=Export the public report's numbers from the marts (started nightly by Airflow, after the marts)
+After=network-online.target
+Wants=network-online.target
+OnFailure=bluesky-alert@%n.service
+
+[Service]
+Type=oneshot
+User=bluesky
+Group=bluesky
+WorkingDirectory=/var/lib/bluesky
+EnvironmentFile=/etc/bluesky/process.env
+EnvironmentFile=-/etc/bluesky/monitor.env
+ExecStart=/opt/bluesky-stream-analytics/.venv/bin/export-dashboard --bucket ${BUCKET}
+ExecStartPost=/opt/bluesky-stream-analytics/.venv/bin/ping-check bluesky-export
+Environment=PYTHONUNBUFFERED=1
+Nice=10
+StateDirectory=bluesky
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=read-only

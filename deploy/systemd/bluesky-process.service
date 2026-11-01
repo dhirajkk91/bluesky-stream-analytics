@@ -1,5 +1,5 @@
 [Unit]
-Description=Append uploaded Bluesky event files to the event store, fold them into the projections, and look up changed handles
+Description=Append uploaded Bluesky event files to the event store (started hourly by Airflow)
 After=network-online.target
 Wants=network-online.target
 OnFailure=bluesky-alert@%n.service
@@ -11,13 +11,12 @@ Group=bluesky
 WorkingDirectory=/var/lib/bluesky
 EnvironmentFile=/etc/bluesky/process.env
 EnvironmentFile=-/etc/bluesky/monitor.env
+# The lock keeps it from committing to the tables while compaction does.
 ExecStart=/usr/bin/flock /var/lib/bluesky/lake.lock /opt/bluesky-stream-analytics/.venv/bin/process --warehouse s3://${BUCKET}/warehouse --data-dir /var/lib/bluesky --extension-dir /var/lib/bluesky/duckdb-extensions
-ExecStart=/usr/bin/flock /var/lib/bluesky/lake.lock /opt/bluesky-stream-analytics/.venv/bin/project --warehouse s3://${BUCKET}/warehouse --extension-dir /var/lib/bluesky/duckdb-extensions
-ExecStart=/usr/bin/flock /var/lib/bluesky/lake.lock /opt/bluesky-stream-analytics/.venv/bin/resolve-handles --warehouse s3://${BUCKET}/warehouse --extension-dir /var/lib/bluesky/duckdb-extensions
 ExecStartPost=/opt/bluesky-stream-analytics/.venv/bin/ping-check bluesky-process
+MemoryMax=4G
 Environment=PYTHONUNBUFFERED=1
 Nice=10
-MemoryMax=4G
 StateDirectory=bluesky
 NoNewPrivileges=true
 PrivateTmp=true
