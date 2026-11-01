@@ -27,7 +27,7 @@ def test_the_dags_load_without_errors(dagbag):
 
 
 def test_hourly_runs_its_steps_in_order(dagbag):
-    dag = dagbag.get_dag("hourly")
+    dag = dagbag.dags["hourly"]
     assert dag.timetable.expression == "20 * * * *"
     assert not dag.catchup and dag.max_active_runs == 1
     assert downstream(dag) == {"process": ["project"], "project": ["resolve_handles"], "resolve_handles": []}
@@ -39,7 +39,7 @@ def test_hourly_runs_its_steps_in_order(dagbag):
 
 
 def test_nightly_builds_the_marts_after_compaction_and_vacuums_once_snapshots_expire(dagbag):
-    dag = dagbag.get_dag("nightly")
+    dag = dagbag.dags["nightly"]
     assert dag.timetable.expression == "45 3 * * *"
     assert downstream(dag) == {
         "compact": ["build_marts", "wait_for_snapshots"],
@@ -52,7 +52,7 @@ def test_nightly_builds_the_marts_after_compaction_and_vacuums_once_snapshots_ex
 
 
 def test_rebuild_marts_rebuilds_each_day_then_today_then_exports(dagbag):
-    dag = dagbag.get_dag("rebuild_marts")
+    dag = dagbag.dags["rebuild_marts"]
     assert type(dag.timetable).__name__ == "NullTimetable"  # only runs when triggered
     assert downstream(dag) == {
         "units": ["rebuild_day"],
