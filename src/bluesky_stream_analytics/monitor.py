@@ -9,8 +9,9 @@ a dead server can't report on itself.
 
 `check-health` runs every 10 minutes and looks at what only the server can see:
 how old the newest collected event is, whether finished files are waiting too
-long to be uploaded or processed, and how full the disk is. It pings its own
-check with what it found, so an alert says what's wrong.
+long to be uploaded or processed, how full the disk is, and, when given a Kafka
+broker, whether it answers and every partition of the topic has a leader. It
+pings its own check with what it found, so an alert says what's wrong.
 
 Pings use the project's ping key and the check's name (its slug), from
 HC_PING_KEY. Without a key, pings are skipped and only logged.
@@ -41,6 +42,7 @@ NEWEST_EVENT_LIMIT_SECONDS = 5 * 60  # the collector syncs every 5 seconds
 UPLOAD_WAIT_LIMIT_SECONDS = 30 * 60  # uploads run every 10 minutes
 PROCESS_WAIT_LIMIT_SECONDS = 2 * 60 * 60  # processing runs hourly
 DISK_USED_LIMIT = 0.80
+KAFKA_TIMEOUT_SECONDS = 10
 
 Post = Callable[[str, bytes], None]
 
@@ -175,9 +177,53 @@ def find_problems(
     return problems, ", ".join(summary)
 
 
-def run_check(data_dir: Path, **ping_options) -> int:
+# Kafka's client is imported only by the Kafka check, so ping-check, which every
+# job runs, never depends on it.
+def kafka_admin(bootstrap_servers: str):
+    from bluesky_stream_analytics.topic import admin_client
+
+    return admin_client(bootstrap_servers)
+
+
+def find_kafka_problems(list_topics: Callable[[], object], name: str | None = None) -> tuple[list[str], str]:
+    """
+    Whether the broker answers and the topic (jetstream.events unless named) is
+    whole: list_topics returns the cluster's metadata, as AdminClient.list_topics does.
+    """
+    from confluent_kafka import KafkaException
+
+    from bluesky_stream_analytics.topic import PARTITIONS, TOPIC
+
+    name = name or TOPIC
+
+    try:
+        metadata = list_topics()
+    except KafkaException as error:
+        return [f"Kafka didn't answer: {error.args[0].str()}"], "kafka down"
+
+    topic = metadata.topics.get(name)
+    if topic is None:
+        return [f"Kafka has no {name} topic"], "kafka up, no topic"
+    if topic.error is not None:
+        return [f"Kafka reports an error on {name}: {topic.error.str()}"], "kafka up, topic error"
+
+    problems = []
+    if len(topic.partitions) != PARTITIONS:
+        problems.append(f"{name} has {len(topic.partitions)} partitions, expected {PARTITIONS}")
+    leaderless = sorted(p.id for p in topic.partitions.values() if p.leader < 0)
+    if leaderless:
+        problems.append(f"{name} partitions without a leader: {', '.join(map(str, leaderless))}")
+    return problems, f"kafka up, {len(topic.partitions)} partitions"
+
+
+def run_check(data_dir: Path, kafka_bootstrap: str | None = None, **ping_options) -> int:
     """Check the server, ping the result, and return the exit code: 1 if anything is wrong."""
     problems, summary = find_problems(data_dir)
+    if kafka_bootstrap:
+        admin = kafka_admin(kafka_bootstrap)
+        kafka_problems, kafka_summary = find_kafka_problems(lambda: admin.list_topics(timeout=KAFKA_TIMEOUT_SECONDS))
+        problems += kafka_problems
+        summary = f"{summary}, {kafka_summary}"
     if problems:
         for problem in problems:
             log.error(problem)
@@ -198,11 +244,14 @@ def _logging() -> None:
 
 def check_main() -> None:
     """Command-line entry point for check-health."""
-    parser = argparse.ArgumentParser(description="Check the collector, the file backlog and the disk, and ping the result.")
+    parser = argparse.ArgumentParser(
+        description="Check the collector, the file backlog, the disk and Kafka, and ping the result."
+    )
     parser.add_argument("--data-dir", type=Path, default=Path("data"), help="collector data folder (default: ./data)")
+    parser.add_argument("--kafka", metavar="BOOTSTRAP_SERVERS", help="also check this Kafka broker and the topic")
     args = parser.parse_args()
     _logging()
-    sys.exit(run_check(args.data_dir))
+    sys.exit(run_check(args.data_dir, kafka_bootstrap=args.kafka))
 
 
 def ping_main() -> None:
