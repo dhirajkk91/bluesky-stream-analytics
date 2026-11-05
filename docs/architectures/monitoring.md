@@ -51,8 +51,9 @@ There are two halves:
 | Upload backlog | a finished hour's file has waited more than 30 minutes to be uploaded | uploads run every 10 minutes |
 | Processing backlog | an uploaded file has waited more than 2 hours to be processed | processing runs every hour |
 | Disk | the disk is more than 80% full | it's 100 GB, and the collector can't write once it's full |
+| Kafka | the broker doesn't answer within 10 seconds, the `jetstream.events` topic is missing, or it doesn't have its 3 partitions, each with a leader | a partition without a leader can't be written to or read from |
 
-Its ping always carries a one-line summary ("newest event 2s old, 0 files to upload, 1 files to process, disk 14% used"). When something's wrong, the ping goes to `/fail` with what's wrong first. healthchecks.io puts the last ping's message in the email, so the alert says what broke.
+Its ping always carries a one-line summary ("newest event 2s old, 0 files to upload, 1 files to process, disk 14% used, kafka up, 3 partitions"). When something's wrong, the ping goes to `/fail` with what's wrong first. healthchecks.io puts the last ping's message in the email, so the alert says what broke.
 
 **How a job reports.** Every job unit has two extra lines:
 

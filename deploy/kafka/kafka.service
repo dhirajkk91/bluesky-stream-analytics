@@ -1,0 +1,29 @@
+[Unit]
+Description=Apache Kafka broker and controller (single node, KRaft)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=kafka
+Group=kafka
+ExecStart=/opt/kafka/bin/kafka-server-start.sh /etc/kafka/server.properties
+# A 1 GB heap; the rest of what Kafka uses is the page cache, which the kernel manages.
+Environment="KAFKA_HEAP_OPTS=-Xms512m -Xmx1g"
+Environment=LOG_DIR=/var/log/kafka
+# The start script runs the JVM in its place, so SIGTERM reaches Kafka and it
+# shuts down cleanly, closing its log segments.
+TimeoutStopSec=120
+Restart=on-failure
+RestartSec=10
+LimitNOFILE=100000
+MemoryMax=2G
+StateDirectory=kafka
+LogsDirectory=kafka
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+
+[Install]
+WantedBy=multi-user.target

@@ -1,10 +1,14 @@
 import os
 import re
+import subprocess
+import sys
 import time
 import urllib.error
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
+from confluent_kafka import KafkaError, KafkaException
 
 from bluesky_stream_analytics import monitor
 from bluesky_stream_analytics.cursor import save_cursor
@@ -125,6 +129,68 @@ def test_run_check_pings_success_or_failure(tmp_path, monkeypatch):
     assert body.startswith(b"The newest event is 20 min old")
 
 
+def cluster(partitions: dict[int, int] | None = None, error=None):
+    """Cluster metadata like AdminClient.list_topics returns: partition id to leader, or no topic."""
+    topics = {}
+    if partitions is not None:
+        parts = {i: SimpleNamespace(id=i, leader=leader) for i, leader in partitions.items()}
+        topics["jetstream.events"] = SimpleNamespace(partitions=parts, error=error)
+    return SimpleNamespace(topics=topics)
+
+
+def test_a_healthy_kafka():
+    problems, summary = monitor.find_kafka_problems(lambda: cluster({0: 1, 1: 1, 2: 1}))
+    assert problems == [] and summary == "kafka up, 3 partitions"
+
+
+def test_kafka_not_answering():
+    def unreachable():
+        raise KafkaException(KafkaError(KafkaError._TRANSPORT, "Connection refused"))
+
+    assert monitor.find_kafka_problems(unreachable) == (["Kafka didn't answer: Connection refused"], "kafka down")
+
+
+def test_kafka_without_the_topic_or_with_a_broken_one():
+    assert monitor.find_kafka_problems(lambda: cluster()) == (
+        ["Kafka has no jetstream.events topic"],
+        "kafka up, no topic",
+    )
+    problems, _ = monitor.find_kafka_problems(lambda: cluster({0: 1}, error=KafkaError(KafkaError.LEADER_NOT_AVAILABLE)))
+    assert problems[0].startswith("Kafka reports an error on jetstream.events")
+
+
+def test_kafka_partitions_missing_or_without_a_leader():
+    problems, summary = monitor.find_kafka_problems(lambda: cluster({0: 1, 1: -1}))
+    assert problems == [
+        "jetstream.events has 2 partitions, expected 3",
+        "jetstream.events partitions without a leader: 1",
+    ]
+    assert summary == "kafka up, 2 partitions"
+
+
+def test_a_real_client_with_no_broker_reports_kafka_down():
+    admin = monitor.kafka_admin("127.0.0.1:1")
+    problems, summary = monitor.find_kafka_problems(lambda: admin.list_topics(timeout=2))
+    assert summary == "kafka down" and problems[0].startswith("Kafka didn't answer")
+
+
+def test_run_check_includes_kafka_when_given_a_broker(tmp_path, monkeypatch):
+    monkeypatch.setattr(time, "time", lambda: NOW)
+    monkeypatch.setattr(monitor.shutil, "disk_usage", roomy_disk)
+    monkeypatch.setattr(monitor, "kafka_admin", lambda servers: SimpleNamespace(list_topics=lambda timeout: cluster()))
+    post = FakePost()
+    assert monitor.run_check(healthy_dir(tmp_path), kafka_bootstrap="127.0.0.1:9092", key="k", post=post) == 1
+    url, body = post.calls[-1]
+    assert url.endswith("/bluesky-check/fail")
+    assert body == b"Kafka has no jetstream.events topic\n\nnewest event 3s old, 0 files to upload, 0 files to process, disk 30% used, kafka up, no topic"
+
+
+def test_ping_check_never_loads_the_kafka_client():
+    code = "import sys, bluesky_stream_analytics.monitor; print('confluent_kafka' in sys.modules)"
+    result = subprocess.run([sys.executable, "-c", code], capture_output=True, text=True, check=True)
+    assert result.stdout.strip() == "False"
+
+
 def job_units() -> list[str]:
     """Every unit that runs a job: everything but the collector, the health check and the alert."""
     skip = {"bluesky-collect", "bluesky-check", "bluesky-alert@"}
@@ -142,6 +208,7 @@ def test_every_job_reports_to_healthchecks(name):
 def test_the_health_check_runs_on_a_timer_and_reports():
     unit = (SYSTEMD / "bluesky-check.service").read_text()
     assert "EnvironmentFile=-/etc/bluesky/monitor.env" in unit and "check-health" in unit
+    assert "--kafka 127.0.0.1:9092" in unit
     assert (SYSTEMD / "bluesky-check.timer").exists()
 
 

@@ -9,6 +9,7 @@ authors = [
 requires-python = ">=3.14"
 dependencies = [
     "boto3>=1.43",
+    "confluent-kafka>=2.16",
     "duckdb>=2.0.0",
     "websockets>=17.3",
 ]
@@ -25,6 +26,7 @@ resolve-handles = "bluesky_stream_analytics.handles:main"
 check-health = "bluesky_stream_analytics.monitor:check_main"
 ping-check = "bluesky_stream_analytics.monitor:ping_main"
 export-dashboard = "bluesky_stream_analytics.dashboard:main"
+ensure-topic = "bluesky_stream_analytics.topic:main"
 
 [dependency-groups]
 bench = [
