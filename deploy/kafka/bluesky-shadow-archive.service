@@ -1,0 +1,25 @@
+[Unit]
+Description=Archive the Kafka topic into hourly files under /var/lib/bluesky/shadow, for comparison with the file collector
+After=kafka.service
+Wants=kafka.service
+
+[Service]
+Type=simple
+User=bluesky
+Group=bluesky
+WorkingDirectory=/opt/bluesky-stream-analytics
+ExecStart=/opt/bluesky-stream-analytics/.venv/bin/archive --data-dir /var/lib/bluesky/shadow/archive --kafka 127.0.0.1:9092
+Environment=PYTHONUNBUFFERED=1
+Restart=always
+RestartSec=5
+TimeoutStopSec=120
+StateDirectory=bluesky
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=read-only
+# Below the collectors, like the hourly jobs, so catching up never slows collection.
+Nice=10
+
+[Install]
+WantedBy=multi-user.target

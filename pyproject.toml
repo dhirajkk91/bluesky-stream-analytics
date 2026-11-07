@@ -17,6 +17,7 @@ dependencies = [
 [project.scripts]
 watch = "bluesky_stream_analytics.watch:main"
 collect = "bluesky_stream_analytics.collect:main"
+archive = "bluesky_stream_analytics.archive:main"
 upload = "bluesky_stream_analytics.upload:main"
 process = "bluesky_stream_analytics.process:main"
 fetch-raw = "bluesky_stream_analytics.fetch_raw:main"

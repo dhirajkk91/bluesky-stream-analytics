@@ -319,3 +319,49 @@ def test_failed_write_stops_the_collector_and_saves_the_cursor(tmp_path, monkeyp
     saved = load_cursor(tmp_path / "state" / "cursor.json")
     assert saved == collector.writer.last_synced_time_us == START_US + 599 * 10_000
     assert collected_time_us(tmp_path) == [json.loads(raw)["time_us"] for raw in EVENTS[:600]]
+
+
+def test_collects_to_kafka_and_saves_the_cursor_once_kafka_has_everything(tmp_path):
+    from kafka_fakes import FakeProducer
+
+    from bluesky_stream_analytics.kafka_sink import KafkaSink
+
+    producer = FakeProducer()
+
+    async def scenario():
+        fake = FakeJetstream()
+        async with await serve_fake(fake) as server:
+            await run_until(Collector(tmp_path, url_of(server), KafkaSink(producer)), LAST_US)
+
+    asyncio.run(scenario())
+
+    assert [value for _, _, value, _ in producer.acknowledged] == [raw.encode() for raw in EVENTS]
+    assert load_cursor(tmp_path / "state" / "cursor.json") == LAST_US
+    assert not (tmp_path / "events").exists()
+
+
+def test_a_kafka_failure_stops_the_collector_at_the_last_acknowledged_event(tmp_path):
+    from confluent_kafka import KafkaException
+    from kafka_fakes import FakeProducer
+
+    from bluesky_stream_analytics.kafka_sink import KafkaSink
+
+    producer = FakeProducer(fail_from_time_us=START_US + 600 * 10_000)
+
+    async def scenario():
+        fake = FakeJetstream(pace=0.001)
+        async with await serve_fake(fake) as server:
+            collector = Collector(tmp_path, url_of(server), KafkaSink(producer))
+            with pytest.raises(KafkaException, match="Message timed out"):
+                await asyncio.wait_for(collector.run(), timeout=5)
+            return collector
+
+    collector = asyncio.run(scenario())
+
+    saved = load_cursor(tmp_path / "state" / "cursor.json")
+    acknowledged = [json.loads(value)["time_us"] for _, _, value, _ in producer.acknowledged]
+    assert saved == collector.writer.last_synced_time_us
+    assert saved < START_US + 600 * 10_000
+    # Everything up to the saved cursor is in Kafka, so resuming from it loses nothing.
+    assert acknowledged == [json.loads(raw)["time_us"] for raw in EVENTS[:600]]
+    assert acknowledged[-1] >= saved
