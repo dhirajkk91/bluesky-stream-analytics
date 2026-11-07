@@ -112,7 +112,7 @@ flowchart LR
 | `airflow-scheduler.service` | Runs the DAGs, and their tasks with the LocalExecutor |
 | `airflow-dag-processor.service` | Reads the DAG files from the checkout |
 | `postgresql.service` | Airflow's database, reached over the local socket with no password |
-| `kafka.service` | Apache Kafka as a single node, broker and KRaft controller in one process, on `127.0.0.1` only, as the unprivileged `kafka` user. Java 21, a 1 GB heap, and systemd caps it at 2 GB of memory. Topics are only created by `ensure-topic`, which creates `jetstream.events` or brings its settings in line with `topic.py` |
+| `kafka.service` | Apache Kafka as a single node, broker and KRaft controller in one process, on `127.0.0.1` only, as the unprivileged `kafka` user. Java 21, a 1 GB heap, and systemd caps it at 2 GB of memory. Topics are only created by `ensure-topic`, which creates `jetstream.events` or brings its settings in line with `topic.py`. The topic keeps events for up to 72 hours, capped at 4 GiB per partition, so Kafka never holds more than 12 GiB of the disk |
 
 The job units have no timers: the [Airflow DAGs](orchestration.md) start them, each after the one it depends on. The collector, the uploader and the health check keep their own systemd timers, so that collecting data and alerting don't depend on Airflow.
 
@@ -159,10 +159,10 @@ A1 capacity is only needed to start an instance, so the server is rebooted, neve
    journalctl -u kafka -n 20 --no-pager
    ```
 
-5. Create the topic. A second run should report that it already matches:
+5. Create the topic, as the `bluesky` user, since the virtual environment's Python lives in its home. A second run should report that it already matches:
 
    ```
-   /opt/bluesky-stream-analytics/.venv/bin/ensure-topic
+   sudo -u bluesky /opt/bluesky-stream-analytics/.venv/bin/ensure-topic
    ```
 
 6. Only then install the health check unit that checks Kafka:
