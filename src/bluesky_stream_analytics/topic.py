@@ -33,9 +33,10 @@ TOPIC_CONFIG = {
     # Longer than Jetstream's 36-hour live lookback, so consumers can fall
     # further behind than the collector can.
     "retention.ms": str(72 * HOUR_MS),
-    # A cap per partition, so 3 partitions hold at most 30 GiB of the 100 GB disk.
-    # If a day takes more than a third of it, the cap applies before 72 hours does.
-    "retention.bytes": str(10 * GIB),
+    # A cap per partition, so the 3 partitions hold at most 12 GiB. The disk holds
+    # other data too, and this keeps it under the health check's 80% line. Whichever
+    # comes first, this cap or 72 hours, decides how far back the topic goes.
+    "retention.bytes": str(4 * GIB),
     # Retention only deletes whole, closed segments, so smaller segments keep
     # disk use close to the limits above.
     "segment.bytes": str(256 * MIB),
