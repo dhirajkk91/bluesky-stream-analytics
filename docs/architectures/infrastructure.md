@@ -90,6 +90,7 @@ flowchart LR
 | `/etc/kafka/server.properties` | Copy of `deploy/kafka/server.properties` |
 | `/var/lib/kafka/data` | Kafka's log segments and cluster metadata, owned by the `kafka` user |
 | `/var/log/kafka` | Kafka's own logs, kept as well as the journal |
+| `/var/lib/bluesky/shadow` | The Kafka path's output while it runs beside the file collector: the second collector's cursor (`collector/`) and the archiver's hourly files (`archive/events/`). Nothing uploads or processes these |
 | `/usr/local/sbin/bluesky-unit` | The script Airflow starts job units through, `root:root`, mode `755` |
 | `/etc/sudoers.d/bluesky-airflow` | Lets the `airflow` user run `bluesky-unit` as root, and nothing else |
 
@@ -112,6 +113,8 @@ flowchart LR
 | `airflow-scheduler.service` | Runs the DAGs, and their tasks with the LocalExecutor |
 | `airflow-dag-processor.service` | Reads the DAG files from the checkout |
 | `postgresql.service` | Airflow's database, reached over the local socket with no password |
+| `bluesky-shadow-collect.service` | Runs `collect --kafka`, a second collector that sends every event to the `jetstream.events` topic instead of writing files. It saves its cursor only once Kafka has acknowledged everything sent |
+| `bluesky-shadow-archive.service` | Runs `archive`, which reads the topic and writes the same hourly files as the collector, under `/var/lib/bluesky/shadow/archive`. It commits its Kafka offsets only once the files are synced to disk |
 | `kafka.service` | Apache Kafka as a single node, broker and KRaft controller in one process, on `127.0.0.1` only, as the unprivileged `kafka` user. Java 21, a 1 GB heap, and systemd caps it at 2 GB of memory. Topics are only created by `ensure-topic`, which creates `jetstream.events` or brings its settings in line with `topic.py`. The topic keeps events for up to 72 hours, capped at 4 GiB per partition, so Kafka never holds more than 12 GiB of the disk |
 
 The job units have no timers: the [Airflow DAGs](orchestration.md) start them, each after the one it depends on. The collector, the uploader and the health check keep their own systemd timers, so that collecting data and alerting don't depend on Airflow.

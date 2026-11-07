@@ -63,3 +63,15 @@ def test_the_unit_runs_the_installed_config_and_owns_the_data_directory():
     assert "ExecStart=/opt/kafka/bin/kafka-server-start.sh /etc/kafka/server.properties" in unit
     assert "StateDirectory=kafka" in unit and config["log.dirs"].startswith("/var/lib/kafka/")
     assert 'Environment="KAFKA_HEAP_OPTS=-Xms512m -Xmx1g"' in unit
+
+
+def test_the_shadow_units_write_only_where_nothing_uploads_or_processes():
+    for name, command in [("bluesky-shadow-collect", "collect"), ("bluesky-shadow-archive", "archive")]:
+        unit = (DEPLOY / f"{name}.service").read_text()
+        exec_start = next(line for line in unit.splitlines() if line.startswith("ExecStart="))
+        data_dir = exec_start.split("--data-dir ")[1].split()[0]
+        assert exec_start.startswith(f"ExecStart=/opt/bluesky-stream-analytics/.venv/bin/{command} ")
+        assert "--kafka 127.0.0.1:9092" in exec_start
+        assert data_dir.startswith("/var/lib/bluesky/shadow/")
+        assert "After=" in unit and "kafka.service" in unit.split("After=")[1].splitlines()[0]
+        assert "User=bluesky" in unit

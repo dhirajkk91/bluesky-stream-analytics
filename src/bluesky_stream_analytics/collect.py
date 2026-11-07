@@ -1,9 +1,11 @@
 """
-Collect every Jetstream event into hourly raw files and resume after restarts without gaps.
+Collect every Jetstream event and resume after restarts without gaps.
 
 The asyncio loop only reads from the connection and queues each event. A writer
-thread takes events off the queue, writes them to the hourly files, syncs them
-to disk and saves the cursor, so a slow disk never holds up reading.
+thread takes events off the queue and hands them to a sink: the hourly raw files
+by default, or the Kafka topic with --kafka. Every few seconds it syncs the sink
+(to disk, or until Kafka has acknowledged everything) and only then saves the
+cursor, so a slow disk or a slow Kafka never holds up reading.
 """
 
 import argparse
@@ -21,6 +23,7 @@ from websockets.asyncio.client import connect
 from websockets.exceptions import WebSocketException
 
 from bluesky_stream_analytics.cursor import load_cursor, save_cursor
+from bluesky_stream_analytics.kafka_sink import KafkaSink, make_producer
 from bluesky_stream_analytics.writer import HourlyFileWriter, recover_open_files
 
 log = logging.getLogger(__name__)
@@ -54,12 +57,17 @@ def backoff_delay(attempt: int) -> float:
 
 
 class Collector:
-    """Reads Jetstream on the asyncio loop and hands events to a writer thread that owns the files."""
+    """
+    Reads Jetstream on the asyncio loop and hands events to a writer thread that owns
+    the sink: the hourly files unless another sink with the same methods is given.
+    """
 
-    def __init__(self, data_dir: Path, url: str = JETSTREAM_URL) -> None:
+    def __init__(
+        self, data_dir: Path, url: str = JETSTREAM_URL, sink: HourlyFileWriter | KafkaSink | None = None
+    ) -> None:
         self.url = url
         self.cursor_path = data_dir / "state" / "cursor.json"
-        self.writer = HourlyFileWriter(data_dir)
+        self.writer = sink or HourlyFileWriter(data_dir)
         self.data_dir = data_dir
         self._stop = asyncio.Event()
         self._attempt = 0
@@ -262,7 +270,7 @@ class Collector:
             return "n/a" if time_us is None else f"{time.time() - time_us / 1e6:.1f}s"
 
         log.info(
-            "%s events in %.0fs (%.1f/s), %s behind live, queue max %s, on disk up to %s ago, "
+            "%s events in %.0fs (%.1f/s), %s behind live, queue max %s, saved up to %s ago, "
             "longest sync %.2fs, longest pause %.2fs%s",
             f"{self._events_since_status:,}",
             elapsed,
@@ -282,8 +290,9 @@ class Collector:
         self._queue_full_logged = False
 
 
-async def _run(data_dir: Path, url: str) -> None:
-    collector = Collector(data_dir, url)
+async def _run(data_dir: Path, url: str, kafka: str | None) -> None:
+    sink = KafkaSink(make_producer(kafka)) if kafka else None
+    collector = Collector(data_dir, url, sink)
     loop = asyncio.get_running_loop()
     for sig in (signal.SIGINT, signal.SIGTERM):
         loop.add_signal_handler(sig, collector.stop)
@@ -292,9 +301,14 @@ async def _run(data_dir: Path, url: str) -> None:
 
 def main() -> None:
     """Command-line entry point."""
-    parser = argparse.ArgumentParser(description="Collect Bluesky Jetstream events to hourly files.")
+    parser = argparse.ArgumentParser(description="Collect Bluesky Jetstream events to hourly files, or to Kafka.")
     parser.add_argument("--data-dir", type=Path, default=Path("data"), help="output folder (default: ./data)")
     parser.add_argument("--url", default=JETSTREAM_URL, help="Jetstream subscribe URL")
+    parser.add_argument(
+        "--kafka",
+        metavar="BOOTSTRAP_SERVERS",
+        help="send events to the Kafka topic instead of files; --data-dir then only holds the cursor",
+    )
     args = parser.parse_args()
 
     logging.basicConfig(
@@ -302,7 +316,7 @@ def main() -> None:
         format="%(asctime)s %(levelname)s %(message)s",
         datefmt="%Y-%m-%d %H:%M:%S",
     )
-    asyncio.run(_run(args.data_dir, args.url))
+    asyncio.run(_run(args.data_dir, args.url, args.kafka))
 
 
 if __name__ == "__main__":

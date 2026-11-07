@@ -6,15 +6,21 @@ Each test works on its own throwaway topic and deletes only that one, so the
 tests are safe even against a broker that holds jetstream.events.
 """
 
+import contextlib
+import json
 import os
+import threading
 import time
 import uuid
 
 import pytest
+from compression import zstd
 from confluent_kafka import KafkaException
 from confluent_kafka.admin import NewTopic
 
-from bluesky_stream_analytics import monitor, topic
+from bluesky_stream_analytics import archive, monitor, topic
+from bluesky_stream_analytics.archive import Archiver, make_consumer
+from bluesky_stream_analytics.kafka_sink import KafkaSink, make_producer
 
 BOOTSTRAP = os.environ.get("KAFKA_BOOTSTRAP")
 pytestmark = pytest.mark.skipif(not BOOTSTRAP, reason="needs a Kafka broker in KAFKA_BOOTSTRAP")
@@ -94,3 +100,53 @@ def test_the_health_check_sees_the_topic(admin, name):
     topic.ensure_topic(admin, name)
     wait_until(lambda: has_leaders(admin, name))
     assert check() == ([], "kafka up, 3 partitions")
+
+
+def archived_lines(data_dir) -> list[str]:
+    lines = []
+    for path in (data_dir / "events").rglob("*.jsonl.zst"):
+        with zstd.open(path, "rt") as f:
+            lines.extend(line.rstrip("\n") for line in f)
+    return lines
+
+
+def archive_in_background(archiver: Archiver) -> threading.Thread:
+    thread = threading.Thread(target=archiver.run)
+    thread.start()
+    return thread
+
+
+def test_events_go_through_kafka_into_the_same_files(admin, name, tmp_path, monkeypatch):
+    monkeypatch.setattr(archive, "STATUS_INTERVAL_SECONDS", 10**6)
+    topic.ensure_topic(admin, name)
+    wait_until(lambda: has_leaders(admin, name))
+
+    start_us = 1_793_000_000_000_000
+    events = [
+        json.dumps({"did": f"did:plc:{i % 40}", "time_us": start_us + i * 1_000, "kind": "commit"}) for i in range(2_000)
+    ]
+    sink = KafkaSink(make_producer(BOOTSTRAP), topic=name)
+    for raw in events:
+        sink.write(raw, json.loads(raw)["time_us"])
+    assert sink.close() == start_us + 1_999 * 1_000
+
+    group = f"test.archiver.{uuid.uuid4().hex[:12]}"
+    try:
+        first = Archiver(tmp_path / "first", make_consumer(BOOTSTRAP, group), topic=name)
+        thread = archive_in_background(first)
+        wait_until(lambda: first._events_since_status >= len(events))
+        first.stop()
+        thread.join(timeout=30)
+        assert sorted(archived_lines(tmp_path / "first")) == sorted(events)
+
+        # The same group starts where the first archiver committed, so there's nothing left to read.
+        second = Archiver(tmp_path / "second", make_consumer(BOOTSTRAP, group), topic=name)
+        thread = archive_in_background(second)
+        time.sleep(8)
+        second.stop()
+        thread.join(timeout=30)
+        assert archived_lines(tmp_path / "second") == []
+    finally:
+        # Tidy up the test's group; a failure here says nothing about the archiver.
+        with contextlib.suppress(KafkaException):
+            admin.delete_consumer_groups([group])[group].result()
